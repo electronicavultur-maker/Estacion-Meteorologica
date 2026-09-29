@@ -18,7 +18,7 @@
 
 // ================= CONFIGURACIÓN =================
 #define ESTACION_NUMERO 1
-#define FIRMWARE_VERSION "1.7" //Implementacion de actualizacion por OTA
+#define FIRMWARE_VERSION "1.6" //Implementacion de actualizacion por OTA
 
 #define MQTT_BROKER    "200.44.171.179"
 #define MQTT_PORT      4033
