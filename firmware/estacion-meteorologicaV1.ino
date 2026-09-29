@@ -33,7 +33,7 @@
 
 #define MQTT_RETRY_MS 10000
 
-String mqtt_client_id = "estacion-" + String(ESTACION_NUMERO);
+String mqtt_client_id = "";
 
 // ─── Seguridad OTA ───────────────────────────────────────────
 #define OTA_TOKEN "12345678"
@@ -214,6 +214,8 @@ void setup() {
     serN = String(ESTACION_NUMERO);
     preferences.putString("serN", serN);
   }
+
+  mqtt_client_id = "estacion-" + String(serN);
 
   configurarAPI();
 
@@ -906,9 +908,14 @@ void ejecutarOTA() {
   Serial.printf("[OTA] URL: %s\n", otaUrl.c_str());
 
   publicarOtaEstado((String("{\"status\":\"descargando\",\"version_actual\":\"") + FIRMWARE_VERSION + "\",\"version_nueva\":\"" + otaVersion + "\"}").c_str());
-
   mqttClient.loop();
   delay(300);
+
+  // Liberar RAM: el BT consume mucha y TLS necesita un bloque grande
+  Serial.printf("[OTA] Heap libre antes: %u  |  bloque max: %u\n", ESP.getFreeHeap(), ESP.getMaxAllocHeap());
+  BT.end();
+  delay(200);
+  Serial.printf("[OTA] Heap libre después de BT.end(): %u  |  bloque max: %u\n", ESP.getFreeHeap(), ESP.getMaxAllocHeap());
 
   WiFiClientSecure client;
   client.setInsecure();
