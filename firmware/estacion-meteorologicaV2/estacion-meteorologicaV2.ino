@@ -7,7 +7,6 @@
 #include <SPI.h>
 #include <HTTPClient.h>
 #include <HTTPUpdate.h>
-#include <PubSubClient.h>
 #include <WiFi.h>
 #include <WiFiClientSecure.h>
 #include <BluetoothSerial.h>
@@ -17,27 +16,14 @@
 #include <time.h>
 
 // ================= CONFIGURACIÓN =================
-#define ESTACION_NUMERO 119
-#define FIRMWARE_VERSION "2.4"  //Actualizacion automatica via OTA
+#define ESTACION_NUMERO 1
+#define FIRMWARE_VERSION "2.4"  //Actualizacion OTA diaria via GitHub
 
-#define MQTT_BROKER "200.44.171.179"
-#define MQTT_PORT 4033
-
-// Añade estas tres líneas:
-#define MQTT_USER ""      // Déjalo vacío si tu broker no pide usuario
-#define MQTT_PASSWORD ""  // Déjalo vacío si tu broker no pide contraseña
-#define TOPIC_ESTADO "estacion/estado"
-
-#define TOPIC_OTA_CMD "estacion/ota/cmd"
-#define TOPIC_OTA_ESTADO "estacion/ota/estado"
-
-#define MQTT_RETRY_MS 10000
-
-String mqtt_client_id = "";
-
-// ─── Seguridad OTA ───────────────────────────────────────────
-#define OTA_TOKEN "12345678"
-
+// ─── OTA diaria desde GitHub ─────────────────────────────────
+// Archivo JSON con el formato: {"version":"2.5","url":"https://.../firmware.bin"}
+#define OTA_VERSION_URL "https://raw.githubusercontent.com/electronicavultur-maker/Estacion-Meteorologica/main/version_firmware.json"
+#define OTA_HORA_REVISION 3             // Hora (RTC) a partir de la cual se revisa 1 vez al dia
+#define OTA_REINTENTO_MS 1800000UL      // Si la revision falla, reintenta cada 30 min
 
 #define pinH 27
 #define pinAne 34
@@ -230,15 +216,6 @@ DeviceMode deviceMode = MODE_SD;
 unsigned long lastWifiTry = 0;
 const unsigned long WIFI_RETRY_MS = 30000;
 
-// ================= MQTT =================
-WiFiClient wifiClientMqtt;
-PubSubClient mqttClient(wifiClientMqtt);
-unsigned long lastMqttRetry = 0;
-
-volatile bool otaRequested = false;
-String otaVersion = "";
-String otaUrl = "";
-
 // ================= PROTOTIPOS =================
 bool scanI2C();
 float leerRadiancia();
@@ -258,10 +235,12 @@ void contar();
 
 int sendPostRequest(DateTime now, Medidas m);
 int sendPostRequestFromJson(String paquete);
-void connectMQTT();
-void mqttCallback(char *topic, byte *payload, unsigned int length);
-void publicarOtaEstado(const char *msg);
-void ejecutarOTA();
+void gestionarOTADiaria();
+bool revisarActualizacionOTA();
+bool obtenerInfoOTA(String &version, String &url);
+void ejecutarOTA(const String &version, const String &url);
+bool versionEsMayor(String nueva, String actual);
+String extraerCampoJson(const String &json, const char *campo);
 
 void bluetoothT(void *p);
 
@@ -320,8 +299,6 @@ void setup() {
       preferences.putString("serN", serN);
     }
 
-    mqtt_client_id = "estacion-" + String(serN);
-
     configurarAPI();
 
     // ---- WIFI ----
@@ -329,12 +306,6 @@ void setup() {
     Serial.println(WiFi.macAddress());
 
     asegurarWiFi();
-
-    // ─── MQTT ─────────────────────────────────────────────────────
-    mqttClient.setServer(MQTT_BROKER, MQTT_PORT);
-    mqttClient.setCallback(mqttCallback);
-    mqttClient.setBufferSize(512);
-    connectMQTT();
 
     BT.begin(("Estacion Meteorologica_" + String(serN)).c_str());  //Inicializacion de Bluetooth
     xTaskCreate(bluetoothT, "bluetooth", 4096, NULL, 1, NULL);     //Inicializacion de la tarea para la conexion Bluetooth
@@ -361,21 +332,8 @@ void loop() {
     regLoop();
   }
 
-  if (asegurarWiFi()) {
-    if (!mqttClient.connected()) {
-      if (millis() - lastMqttRetry > MQTT_RETRY_MS) {
-        lastMqttRetry = millis();
-        connectMQTT();
-      }
-    } else {
-      mqttClient.loop();
-    }
-
-    if (otaRequested) {
-      otaRequested = false;
-      ejecutarOTA();
-    }
-  }
+  asegurarWiFi();
+  gestionarOTADiaria();
 }
 
 void SDloop() {
@@ -1164,111 +1122,166 @@ bool scanI2C() {
 
   return found == 0x0F;
 }
-void mqttCallback(char *topic, byte *payload, unsigned int length) {
-  String msg;
-  for (unsigned int i = 0; i < length; i++) msg += (char)payload[i];
-  msg.trim();
-  msg.replace("\\\"", "\"");
+// ============================================================
+//  OTA DIARIA DESDE GITHUB
+// ============================================================
 
-  Serial.printf("[MQTT] <- [%s]: %s\n", topic, msg.c_str());
+// Se llama en cada vuelta del loop. Revisa como maximo 1 vez al dia
+// (a partir de OTA_HORA_REVISION) y solo si hay WiFi.
+// La revision solo arranca 1-2 minutos despues de una marca de 5 min,
+// para no pisar las mediciones (que se toman en minutos multiplos de 5).
+void gestionarOTADiaria() {
+  static int ultimoDiaRevisado = -1;
+  static unsigned long ultimoIntento = 0;
+  static bool hayIntentoPrevio = false;
 
-  if (strcmp(topic, TOPIC_OTA_CMD) == 0) {
-    String token = "";
-    String version = "";
-    String url = "";
+  if (WiFi.status() != WL_CONNECTED) return;
 
-    int idxT = msg.indexOf("\"token\"");
-    if (idxT != -1) {
-      int q1 = msg.indexOf('"', idxT + 7);
-      int q2 = msg.indexOf('"', q1 + 1);
-      if (q1 != -1 && q2 != -1) token = msg.substring(q1 + 1, q2);
-    }
+  DateTime now = rtc.now();
+  int claveDia = now.month() * 100 + now.day();
 
-    int idxV = msg.indexOf("\"version\"");
-    if (idxV != -1) {
-      int q1 = msg.indexOf('"', idxV + 9);
-      int q2 = msg.indexOf('"', q1 + 1);
-      if (q1 != -1 && q2 != -1) version = msg.substring(q1 + 1, q2);
-    }
+  if (claveDia == ultimoDiaRevisado) return;     // ya se reviso hoy
+  if (now.hour() < OTA_HORA_REVISION) return;    // aun no es la hora
 
-    int idxU = msg.indexOf("\"url\"");
-    if (idxU != -1) {
-      int q1 = msg.indexOf('"', idxU + 5);
-      int q2 = msg.indexOf('"', q1 + 1);
-      if (q1 != -1 && q2 != -1) url = msg.substring(q1 + 1, q2);
-    }
+  int m5 = now.minute() % 5;
+  if (m5 < 1 || m5 > 2) return;                  // evitar chocar con mediciones
 
-    if (token.length() < 8 || token != String(OTA_TOKEN)) {
-      Serial.println("[SEC] OTA rechazado: token inválido");
-      publicarOtaEstado("{\"error\":\"token_invalido\"}");
-      return;
-    }
-    if (version.length() == 0 || url.length() == 0) {
-      Serial.println("[SEC] OTA rechazado: faltan campos version o url");
-      publicarOtaEstado("{\"error\":\"campos_faltantes\"}");
-      return;
-    }
-    if (!url.startsWith("https://")) {
-      Serial.println("[SEC] OTA rechazado: URL no es HTTPS");
-      publicarOtaEstado("{\"error\":\"url_no_https\"}");
-      return;
-    }
-    if (version == String(FIRMWARE_VERSION)) {
-      Serial.printf("[OTA] Ya tengo la versión %s, ignorando.\n", FIRMWARE_VERSION);
-      publicarOtaEstado("{\"info\":\"ya_tengo_esta_version\"}");
-      return;
-    }
+  if (hayIntentoPrevio && (millis() - ultimoIntento < OTA_REINTENTO_MS)) return;
+  hayIntentoPrevio = true;
+  ultimoIntento = millis();
 
-    otaVersion = version;
-    otaUrl = url;
-    otaRequested = true;
-    Serial.printf("[OTA] Actualización encolada: v%s → v%s\n", FIRMWARE_VERSION, version.c_str());
+  if (revisarActualizacionOTA()) {
+    ultimoDiaRevisado = claveDia;  // consulta exitosa: no volver a revisar hasta manana
   }
 }
 
-// ============================================================
-//  MQTT — conexión
-// ============================================================
-
-void connectMQTT() {
-  if (mqttClient.connected() || WiFi.status() != WL_CONNECTED) return;
-
-  Serial.printf("[MQTT] Conectando a %s:%d...\n", MQTT_BROKER, MQTT_PORT);
-
-  String mac = WiFi.macAddress();
-  mac.replace(":", "");
-  String clientId = mqtt_client_id + "_" + mac.substring(6);
-
-  bool ok;
-  if (strlen(MQTT_USER) > 0) {
-    ok = mqttClient.connect(clientId.c_str(), MQTT_USER, MQTT_PASSWORD, TOPIC_ESTADO, 0, true, "offline");
-  } else {
-    ok = mqttClient.connect(clientId.c_str(), nullptr, nullptr, TOPIC_ESTADO, 0, true, "offline");
-  }
-
-  if (ok) {
-    mqttClient.publish(TOPIC_ESTADO, "online", true);
-    mqttClient.subscribe(TOPIC_OTA_CMD);
-    Serial.printf("[MQTT] Conectado como '%s'\n", clientId.c_str());
-  } else {
-    Serial.printf("[MQTT] Fallo rc=%d\n", mqttClient.state());
-  }
-}
-
-void ejecutarOTA() {
-  Serial.printf("\n[OTA] ======= INICIANDO OTA =======\n");
-  Serial.printf("[OTA] Actual: v%s  →  Nueva: v%s\n", FIRMWARE_VERSION, otaVersion.c_str());
-  Serial.printf("[OTA] URL: %s\n", otaUrl.c_str());
-
-  publicarOtaEstado((String("{\"status\":\"descargando\",\"version_actual\":\"") + FIRMWARE_VERSION + "\",\"version_nueva\":\"" + otaVersion + "\"}").c_str());
-  mqttClient.loop();
-  delay(300);
+// Devuelve true si pudo consultar el JSON (haya o no actualizacion).
+// Si instala un firmware nuevo, reinicia el equipo y no retorna.
+bool revisarActualizacionOTA() {
+  Serial.println(F("[OTA] Revisando version_firmware.json..."));
 
   // Liberar RAM: el BT consume mucha y TLS necesita un bloque grande
   Serial.printf("[OTA] Heap libre antes: %u  |  bloque max: %u\n", ESP.getFreeHeap(), ESP.getMaxAllocHeap());
   BT.end();
   delay(200);
-  Serial.printf("[OTA] Heap libre después de BT.end(): %u  |  bloque max: %u\n", ESP.getFreeHeap(), ESP.getMaxAllocHeap());
+  Serial.printf("[OTA] Heap libre despues de BT.end(): %u  |  bloque max: %u\n", ESP.getFreeHeap(), ESP.getMaxAllocHeap());
+
+  String version, url;
+  bool consultaOK = obtenerInfoOTA(version, url);
+
+  if (consultaOK) {
+    if (versionEsMayor(version, FIRMWARE_VERSION)) {
+      Serial.printf("[OTA] Nueva version disponible: v%s (actual v%s)\n", version.c_str(), FIRMWARE_VERSION);
+      ejecutarOTA(version, url);  // si sale bien, reinicia y no vuelve
+    } else {
+      Serial.printf("[OTA] Firmware al dia (actual v%s, remota v%s)\n", FIRMWARE_VERSION, version.c_str());
+    }
+  }
+
+  // Si llegamos aqui no se actualizo: reactivar Bluetooth
+  BT.begin(("Estacion Meteorologica_" + String(serN)).c_str());
+  return consultaOK;
+}
+
+// Descarga y valida el JSON {"version":"x.y","url":"https://..."}
+bool obtenerInfoOTA(String &version, String &url) {
+  WiFiClientSecure client;
+  client.setInsecure();
+
+  HTTPClient http;
+  http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
+  http.setTimeout(10000);
+
+  if (!http.begin(client, OTA_VERSION_URL)) {
+    Serial.println(F("[OTA] No se pudo iniciar la conexion con GitHub"));
+    return false;
+  }
+
+  int code = http.GET();
+  if (code != HTTP_CODE_OK) {
+    Serial.printf("[OTA] Error HTTP al leer el JSON: %d\n", code);
+    http.end();
+    return false;
+  }
+
+  String payload = http.getString();
+  http.end();
+
+  if (payload.length() == 0 || payload.length() > 1024) {
+    Serial.println(F("[OTA] JSON vacio o demasiado grande"));
+    return false;
+  }
+
+  version = extraerCampoJson(payload, "version");
+  url = extraerCampoJson(payload, "url");
+  version.trim();
+  url.trim();
+
+  if (version.length() == 0 || url.length() == 0) {
+    Serial.println(F("[OTA] JSON invalido: faltan campos version o url"));
+    return false;
+  }
+  if (!url.startsWith("https://")) {
+    Serial.println(F("[OTA] Rechazado: la URL del firmware no es HTTPS"));
+    return false;
+  }
+  return true;
+}
+
+// Extrae el valor de un campo, tanto si viene entre comillas ("2.5") como sin ellas (2.5)
+String extraerCampoJson(const String &json, const char *campo) {
+  String clave = String("\"") + campo + "\"";
+  int idx = json.indexOf(clave);
+  if (idx < 0) return "";
+
+  int dosPuntos = json.indexOf(':', idx + clave.length());
+  if (dosPuntos < 0) return "";
+
+  int i = dosPuntos + 1;
+  int len = json.length();
+  while (i < len && isspace((unsigned char)json[i])) i++;
+  if (i >= len) return "";
+
+  if (json[i] == '"') {
+    int fin = json.indexOf('"', i + 1);
+    if (fin < 0) return "";
+    return json.substring(i + 1, fin);
+  }
+
+  int fin = i;
+  while (fin < len && json[fin] != ',' && json[fin] != '}' && !isspace((unsigned char)json[fin])) fin++;
+  return json.substring(i, fin);
+}
+
+// Compara versiones numericas separadas por punto: "2.10" > "2.9", "2.4" > "2.3"
+bool versionEsMayor(String nueva, String actual) {
+  nueva.trim();
+  actual.trim();
+  if (nueva.startsWith("v") || nueva.startsWith("V")) nueva.remove(0, 1);
+  if (actual.startsWith("v") || actual.startsWith("V")) actual.remove(0, 1);
+
+  unsigned int i = 0, j = 0;
+  while (i < nueva.length() || j < actual.length()) {
+    long a = 0, b = 0;
+    while (i < nueva.length() && nueva[i] != '.') {
+      if (isDigit(nueva[i])) a = a * 10 + (nueva[i] - '0');
+      i++;
+    }
+    while (j < actual.length() && actual[j] != '.') {
+      if (isDigit(actual[j])) b = b * 10 + (actual[j] - '0');
+      j++;
+    }
+    i++;  // saltar el punto
+    j++;
+    if (a != b) return a > b;
+  }
+  return false;  // iguales
+}
+
+void ejecutarOTA(const String &version, const String &url) {
+  Serial.printf("\n[OTA] ======= INICIANDO OTA =======\n");
+  Serial.printf("[OTA] Actual: v%s  ->  Nueva: v%s\n", FIRMWARE_VERSION, version.c_str());
+  Serial.printf("[OTA] URL: %s\n", url.c_str());
 
   WiFiClientSecure client;
   client.setInsecure();
@@ -1277,40 +1290,19 @@ void ejecutarOTA() {
   httpUpdate.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
 
   Serial.println("[OTA] Descargando .bin...");
-  t_httpUpdate_return result = httpUpdate.update(client, otaUrl);
+  t_httpUpdate_return result = httpUpdate.update(client, url);
 
   switch (result) {
     case HTTP_UPDATE_FAILED:
-      {
-        String errMsg = String("{\"error\":\"") + httpUpdate.getLastErrorString() + "\"}";
-        Serial.printf("[OTA] ERROR: %s\n", httpUpdate.getLastErrorString().c_str());
-        publicarOtaEstado(errMsg.c_str());
-        break;
-      }
+      Serial.printf("[OTA] ERROR: %s\n", httpUpdate.getLastErrorString().c_str());
+      break;
     case HTTP_UPDATE_NO_UPDATES:
       Serial.println("[OTA] El servidor dice: sin cambios en el .bin");
-      publicarOtaEstado("{\"info\":\"sin_cambios_en_servidor\"}");
       break;
     case HTTP_UPDATE_OK:
-      {
-        String okMsg = String("{\"status\":\"ok\",\"version\":\"") + otaVersion + "\"}";
-        Serial.println("[OTA] Descarga OK. Reiniciando...");
-        publicarOtaEstado(okMsg.c_str());
-        mqttClient.loop();
-        delay(500);
-        ESP.restart();
-        break;
-      }
-  }
-}
-
-// ============================================================
-//  PUBLICACIÓN MQTT
-// ============================================================
-
-void publicarOtaEstado(const char *msg) {
-  if (mqttClient.connected()) {
-    mqttClient.publish(TOPIC_OTA_ESTADO, msg, false);
-    Serial.printf("[OTA] Estado: %s\n", msg);
+      Serial.println("[OTA] Descarga OK. Reiniciando...");
+      delay(500);
+      ESP.restart();
+      break;
   }
 }
