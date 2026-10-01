@@ -18,18 +18,18 @@
 
 // ================= CONFIGURACIÓN =================
 #define ESTACION_NUMERO 119
-#define FIRMWARE_VERSION "2.2" //correccion de errores al enviar
+#define FIRMWARE_VERSION "2.3"  //Envio de respaldo via Bluetooth y actualizacion via OTA
 
-#define MQTT_BROKER    "200.44.171.179"
-#define MQTT_PORT      4033
+#define MQTT_BROKER "200.44.171.179"
+#define MQTT_PORT 4033
 
 // Añade estas tres líneas:
-#define MQTT_USER     "" // Déjalo vacío si tu broker no pide usuario
-#define MQTT_PASSWORD "" // Déjalo vacío si tu broker no pide contraseña
-#define TOPIC_ESTADO  "estacion/estado"
+#define MQTT_USER ""      // Déjalo vacío si tu broker no pide usuario
+#define MQTT_PASSWORD ""  // Déjalo vacío si tu broker no pide contraseña
+#define TOPIC_ESTADO "estacion/estado"
 
-#define TOPIC_OTA_CMD     "estacion/ota/cmd"
-#define TOPIC_OTA_ESTADO  "estacion/ota/estado"
+#define TOPIC_OTA_CMD "estacion/ota/cmd"
+#define TOPIC_OTA_ESTADO "estacion/ota/estado"
 
 #define MQTT_RETRY_MS 10000
 
@@ -230,12 +230,21 @@ DeviceMode deviceMode = MODE_SD;
 unsigned long lastWifiTry = 0;
 const unsigned long WIFI_RETRY_MS = 30000;
 
+// ================= MQTT =================
+WiFiClient wifiClientMqtt;
+PubSubClient mqttClient(wifiClientMqtt);
+unsigned long lastMqttRetry = 0;
+
+volatile bool otaRequested = false;
+String otaVersion = "";
+String otaUrl = "";
+
 // ================= PROTOTIPOS =================
 bool scanI2C();
 float leerRadiancia();
 void actualizarSensores(AcumuladosSensores &S);
 void actualizarAnemometro(AcumuladosAnemometro &A);
-void asegurarWiFi();
+bool asegurarWiFi();
 void configurarAPI();
 bool tMedidas(int conf, int minutos, int segundos);
 bool sincronizarRTCconNTP();
@@ -249,6 +258,10 @@ void contar();
 
 int sendPostRequest(DateTime now, Medidas m);
 int sendPostRequestFromJson(String paquete);
+void connectMQTT();
+void mqttCallback(char *topic, byte *payload, unsigned int length);
+void publicarOtaEstado(const char *msg);
+void ejecutarOTA();
 
 void bluetoothT(void *p);
 
@@ -306,11 +319,22 @@ void setup() {
       serN = String(ESTACION_NUMERO);
       preferences.putString("serN", serN);
     }
+
+    mqtt_client_id = "estacion-" + String(serN);
+
     configurarAPI();
 
     // ---- WIFI ----
     WiFi.begin(ssid.c_str(), password.c_str());
     Serial.println(WiFi.macAddress());
+
+    asegurarWiFi();
+
+    // ─── MQTT ─────────────────────────────────────────────────────
+    mqttClient.setServer(MQTT_BROKER, MQTT_PORT);
+    mqttClient.setCallback(mqttCallback);
+    mqttClient.setBufferSize(512);
+    connectMQTT();
 
     BT.begin(("Estacion Meteorologica_" + String(serN)).c_str());  //Inicializacion de Bluetooth
     xTaskCreate(bluetoothT, "bluetooth", 4096, NULL, 1, NULL);     //Inicializacion de la tarea para la conexion Bluetooth
@@ -335,6 +359,22 @@ void loop() {
     SDloop();
   } else {
     regLoop();
+  }
+
+  if (asegurarWiFi()) {
+    if (!mqttClient.connected()) {
+      if (millis() - lastMqttRetry > MQTT_RETRY_MS) {
+        lastMqttRetry = millis();
+        connectMQTT();
+      }
+    } else {
+      mqttClient.loop();
+    }
+
+    if (otaRequested) {
+      otaRequested = false;
+      ejecutarOTA();
+    }
   }
 }
 
@@ -591,15 +631,18 @@ void configurarAPI() {
   Serial.println(apiEndpoint);
 }
 
-void asegurarWiFi() {
+bool asegurarWiFi() {
+  // 1. Si ya está conectado, devuelve true inmediatamente
   if (WiFi.status() == WL_CONNECTED) {
-    BT.println("Conectado a WiFi");
-    return;
+    return true;
   }
 
+  // 2. Si no está conectado, verifica si ya pasó el tiempo para reintentar
   if (millis() - lastWifiTry > WIFI_RETRY_MS) {
     lastWifiTry = millis();
     WiFi.begin(ssid.c_str(), password.c_str());
+
+    // Secuencia de parpadeo del indicador
     digitalWrite(Indef, HIGH);
     delay(100);
     digitalWrite(Indef, LOW);
@@ -609,6 +652,9 @@ void asegurarWiFi() {
     digitalWrite(Indef, LOW);
     delay(100);
   }
+
+  // 3. Si no hay conexión (o el intento acaba de iniciarse en segundo plano), devuelve false
+  return false;
 }
 
 int sendPostRequest(DateTime now, Medidas M) {
@@ -871,22 +917,22 @@ void guardarRespaldoSD(Medidas M) {
 
 float leerHumedadFiltrada() {
 
-    float h;
+  float h;
 
-    // Reintenta hasta 3 veces
-    for (int i = 0; i < 3; i++) {
-        h = dht.readHumidity();
+  // Reintenta hasta 3 veces
+  for (int i = 0; i < 3; i++) {
+    h = dht.readHumidity();
 
-        if (!isnan(h)) {
-            ultimaHumedad = h;
-            return h;
-        }
-
-        delay(50);
+    if (!isnan(h)) {
+      ultimaHumedad = h;
+      return h;
     }
 
-    // Si falló, usa el último valor válido
-    return ultimaHumedad;
+    delay(50);
+  }
+
+  // Si falló, usa el último valor válido
+  return ultimaHumedad;
 }
 
 //============= BLUETOOTH ===============
@@ -900,7 +946,28 @@ void bluetoothT(void *p) {
       incoming.toLowerCase();
 
       Serial.println(incoming);
-      if (incoming == "wifi") {
+      if (incoming == "descargar") {
+        Serial.println("descargando informacion");
+        myFile = SD.open("/resp.csv", FILE_READ);
+        if (!myFile) {
+          BT.println("Error al leer el archivo");
+          Serial.println("Error al leer el archivo");
+          return;
+        }
+        BT.println("Transmitiendo información...");
+        Serial.println("Transmitiendo información...");
+        while (myFile.available()) {
+          BT.write(myFile.read());
+        }
+        myFile.close();
+        if (SD.remove("/resp.csv")) {
+          Serial.println("Archivo resp.csv eliminado.");
+        } else {
+          Serial.println("Error al eliminar el archivo resp.csv.");
+        }
+        BT.println("Transmisión completa.");
+        Serial.println("Transmisión completa.");
+      } else if (incoming == "wifi") {
         BT.println("Ingrese el nombre de la red");
         while (1) {
           if (BT.available()) {
@@ -1097,4 +1164,153 @@ bool scanI2C() {
 
   return found == 0x0F;
 }
+void mqttCallback(char *topic, byte *payload, unsigned int length) {
+  String msg;
+  for (unsigned int i = 0; i < length; i++) msg += (char)payload[i];
+  msg.trim();
+  msg.replace("\\\"", "\"");
 
+  Serial.printf("[MQTT] <- [%s]: %s\n", topic, msg.c_str());
+
+  if (strcmp(topic, TOPIC_OTA_CMD) == 0) {
+    String token = "";
+    String version = "";
+    String url = "";
+
+    int idxT = msg.indexOf("\"token\"");
+    if (idxT != -1) {
+      int q1 = msg.indexOf('"', idxT + 7);
+      int q2 = msg.indexOf('"', q1 + 1);
+      if (q1 != -1 && q2 != -1) token = msg.substring(q1 + 1, q2);
+    }
+
+    int idxV = msg.indexOf("\"version\"");
+    if (idxV != -1) {
+      int q1 = msg.indexOf('"', idxV + 9);
+      int q2 = msg.indexOf('"', q1 + 1);
+      if (q1 != -1 && q2 != -1) version = msg.substring(q1 + 1, q2);
+    }
+
+    int idxU = msg.indexOf("\"url\"");
+    if (idxU != -1) {
+      int q1 = msg.indexOf('"', idxU + 5);
+      int q2 = msg.indexOf('"', q1 + 1);
+      if (q1 != -1 && q2 != -1) url = msg.substring(q1 + 1, q2);
+    }
+
+    if (token.length() < 8 || token != String(OTA_TOKEN)) {
+      Serial.println("[SEC] OTA rechazado: token inválido");
+      publicarOtaEstado("{\"error\":\"token_invalido\"}");
+      return;
+    }
+    if (version.length() == 0 || url.length() == 0) {
+      Serial.println("[SEC] OTA rechazado: faltan campos version o url");
+      publicarOtaEstado("{\"error\":\"campos_faltantes\"}");
+      return;
+    }
+    if (!url.startsWith("https://")) {
+      Serial.println("[SEC] OTA rechazado: URL no es HTTPS");
+      publicarOtaEstado("{\"error\":\"url_no_https\"}");
+      return;
+    }
+    if (version == String(FIRMWARE_VERSION)) {
+      Serial.printf("[OTA] Ya tengo la versión %s, ignorando.\n", FIRMWARE_VERSION);
+      publicarOtaEstado("{\"info\":\"ya_tengo_esta_version\"}");
+      return;
+    }
+
+    otaVersion = version;
+    otaUrl = url;
+    otaRequested = true;
+    Serial.printf("[OTA] Actualización encolada: v%s → v%s\n", FIRMWARE_VERSION, version.c_str());
+  }
+}
+
+// ============================================================
+//  MQTT — conexión
+// ============================================================
+
+void connectMQTT() {
+  if (mqttClient.connected() || WiFi.status() != WL_CONNECTED) return;
+
+  Serial.printf("[MQTT] Conectando a %s:%d...\n", MQTT_BROKER, MQTT_PORT);
+
+  String mac = WiFi.macAddress();
+  mac.replace(":", "");
+  String clientId = mqtt_client_id + "_" + mac.substring(6);
+
+  bool ok;
+  if (strlen(MQTT_USER) > 0) {
+    ok = mqttClient.connect(clientId.c_str(), MQTT_USER, MQTT_PASSWORD, TOPIC_ESTADO, 0, true, "offline");
+  } else {
+    ok = mqttClient.connect(clientId.c_str(), nullptr, nullptr, TOPIC_ESTADO, 0, true, "offline");
+  }
+
+  if (ok) {
+    mqttClient.publish(TOPIC_ESTADO, "online", true);
+    mqttClient.subscribe(TOPIC_OTA_CMD);
+    Serial.printf("[MQTT] Conectado como '%s'\n", clientId.c_str());
+  } else {
+    Serial.printf("[MQTT] Fallo rc=%d\n", mqttClient.state());
+  }
+}
+
+void ejecutarOTA() {
+  Serial.printf("\n[OTA] ======= INICIANDO OTA =======\n");
+  Serial.printf("[OTA] Actual: v%s  →  Nueva: v%s\n", FIRMWARE_VERSION, otaVersion.c_str());
+  Serial.printf("[OTA] URL: %s\n", otaUrl.c_str());
+
+  publicarOtaEstado((String("{\"status\":\"descargando\",\"version_actual\":\"") + FIRMWARE_VERSION + "\",\"version_nueva\":\"" + otaVersion + "\"}").c_str());
+  mqttClient.loop();
+  delay(300);
+
+  // Liberar RAM: el BT consume mucha y TLS necesita un bloque grande
+  Serial.printf("[OTA] Heap libre antes: %u  |  bloque max: %u\n", ESP.getFreeHeap(), ESP.getMaxAllocHeap());
+  BT.end();
+  delay(200);
+  Serial.printf("[OTA] Heap libre después de BT.end(): %u  |  bloque max: %u\n", ESP.getFreeHeap(), ESP.getMaxAllocHeap());
+
+  WiFiClientSecure client;
+  client.setInsecure();
+
+  httpUpdate.rebootOnUpdate(false);
+  httpUpdate.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
+
+  Serial.println("[OTA] Descargando .bin...");
+  t_httpUpdate_return result = httpUpdate.update(client, otaUrl);
+
+  switch (result) {
+    case HTTP_UPDATE_FAILED:
+      {
+        String errMsg = String("{\"error\":\"") + httpUpdate.getLastErrorString() + "\"}";
+        Serial.printf("[OTA] ERROR: %s\n", httpUpdate.getLastErrorString().c_str());
+        publicarOtaEstado(errMsg.c_str());
+        break;
+      }
+    case HTTP_UPDATE_NO_UPDATES:
+      Serial.println("[OTA] El servidor dice: sin cambios en el .bin");
+      publicarOtaEstado("{\"info\":\"sin_cambios_en_servidor\"}");
+      break;
+    case HTTP_UPDATE_OK:
+      {
+        String okMsg = String("{\"status\":\"ok\",\"version\":\"") + otaVersion + "\"}";
+        Serial.println("[OTA] Descarga OK. Reiniciando...");
+        publicarOtaEstado(okMsg.c_str());
+        mqttClient.loop();
+        delay(500);
+        ESP.restart();
+        break;
+      }
+  }
+}
+
+// ============================================================
+//  PUBLICACIÓN MQTT
+// ============================================================
+
+void publicarOtaEstado(const char *msg) {
+  if (mqttClient.connected()) {
+    mqttClient.publish(TOPIC_OTA_ESTADO, msg, false);
+    Serial.printf("[OTA] Estado: %s\n", msg);
+  }
+}
