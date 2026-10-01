@@ -17,7 +17,7 @@
 
 // ================= CONFIGURACIÓN =================
 #define ESTACION_NUMERO 1
-#define FIRMWARE_VERSION "2.5"  //Actualizacion OTA diaria via GitHub
+#define FIRMWARE_VERSION "2.6"  //comando para ver la MAC via Bluetooth
 
 // ─── OTA diaria desde GitHub ─────────────────────────────────
 // Archivo JSON con el formato: {"version":"2.5","url":"https://.../firmware.bin"}
@@ -997,6 +997,9 @@ void bluetoothT(void *p) {
 
           vTaskDelay(10);
         }
+      } else if (incoming == "mac") {
+        BT.print("Direccion MAC del diaspositivo (Para API key):");
+        BT.println(WiFi.macAddress());
       }
     }
     vTaskDelay(1);
