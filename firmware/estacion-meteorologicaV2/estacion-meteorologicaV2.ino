@@ -17,11 +17,11 @@
 
 // ================= CONFIGURACIÓN =================
 #define ESTACION_NUMERO 1
-#define FIRMWARE_VERSION "2.4"  //Actualizacion OTA diaria via GitHub
+#define FIRMWARE_VERSION "2.5"  //Actualizacion OTA diaria via GitHub
 
 // ─── OTA diaria desde GitHub ─────────────────────────────────
 // Archivo JSON con el formato: {"version":"2.5","url":"https://.../firmware.bin"}
-#define OTA_VERSION_URL "https://raw.githubusercontent.com/electronicavultur-maker/Estacion-Meteorologica/main/version_firmware.json"
+#define OTA_VERSION_URL "https://raw.githubusercontent.com/electronicavultur-maker/Estacion-Meteorologica/main/firmware_version.json"
 #define OTA_HORA_REVISION 3             // Hora (RTC) a partir de la cual se revisa 1 vez al dia
 #define OTA_REINTENTO_MS 1800000UL      // Si la revision falla, reintenta cada 30 min
 
