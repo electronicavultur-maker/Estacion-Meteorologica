@@ -6,7 +6,10 @@
 #include <SD.h>
 #include <SPI.h>
 #include <HTTPClient.h>
+#include <HTTPUpdate.h>
+#include <PubSubClient.h>
 #include <WiFi.h>
+#include <WiFiClientSecure.h>
 #include <BluetoothSerial.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
@@ -14,7 +17,26 @@
 #include <time.h>
 
 // ================= CONFIGURACIÓN =================
-#define ESTACION_NUMERO 1001
+#define ESTACION_NUMERO 119
+#define FIRMWARE_VERSION "2.2" //correccion de errores al enviar
+
+#define MQTT_BROKER    "200.44.171.179"
+#define MQTT_PORT      4033
+
+// Añade estas tres líneas:
+#define MQTT_USER     "" // Déjalo vacío si tu broker no pide usuario
+#define MQTT_PASSWORD "" // Déjalo vacío si tu broker no pide contraseña
+#define TOPIC_ESTADO  "estacion/estado"
+
+#define TOPIC_OTA_CMD     "estacion/ota/cmd"
+#define TOPIC_OTA_ESTADO  "estacion/ota/estado"
+
+#define MQTT_RETRY_MS 10000
+
+String mqtt_client_id = "";
+
+// ─── Seguridad OTA ───────────────────────────────────────────
+#define OTA_TOKEN "12345678"
 
 
 #define pinH 27
@@ -564,7 +586,7 @@ void configurarAPI() {
     BT.println(apiEndpoint);
     return;
   }
-  apiEndpoint = "http://200.44.171.179:4046/api/stations/" + String(serN) + "/medidas";
+  apiEndpoint = "http://200.44.171.179:4069/api/stations/" + String(serN) + "/medidas";
   preferences.putString("apiURL", apiEndpoint);
   Serial.println(apiEndpoint);
 }
@@ -600,6 +622,7 @@ int sendPostRequest(DateTime now, Medidas M) {
   BT.println("Endpoint: ");
   BT.println(apiEndpoint);
   http.addHeader("Content-Type", "application/json");
+  http.addHeader("X-API-KEY", WiFi.macAddress());
   char fecha[25];
 
   sprintf(fecha,
@@ -617,7 +640,8 @@ int sendPostRequest(DateTime now, Medidas M) {
   jsonBody.reserve(512);
 
   jsonBody = "{";
-  jsonBody += "\"fecha_hora\":\"" + String(fecha) + "\"";
+  jsonBody += "\"id\":\"" + String(serN) + "\"";
+  jsonBody += ",\"fecha_hora\":\"" + String(fecha) + "\"";
   jsonBody += ",\"precipitacion_mm\":" + String(M.precipitacion_mm, 2);
   jsonBody += ",\"temp_aire_prom_c\":" + String(M.temp_aire_prom_c, 2);
   jsonBody += ",\"temp_aire_max_c\":" + String(M.temp_aire_max_c, 2);
@@ -669,6 +693,7 @@ int sendPostRequestFromJson(String paquete) {
   // Configura la solicitud POST
   http.begin(apiEndpoint);
   http.addHeader("Content-Type", "application/json");
+  http.addHeader("X-API-KEY", WiFi.macAddress());
 
   // Construye el cuerpo JSON de la solicitud
   // Realiza la solicitud POST
@@ -820,7 +845,8 @@ void guardarRespaldoSD(Medidas M) {
     ins.reserve(512);
 
     ins = "{";
-    ins += "\"fecha_hora\":\"" + String(fecha) + "\"";
+    ins += "\"id\":\"" + String(serN) + "\"";
+    ins += ",\"fecha_hora\":\"" + String(fecha) + "\"";
     ins += ",\"precipitacion_mm\":" + String(M.precipitacion_mm, 2);
     ins += ",\"temp_aire_prom_c\":" + String(M.temp_aire_prom_c, 2);
     ins += ",\"temp_aire_max_c\":" + String(M.temp_aire_max_c, 2);
