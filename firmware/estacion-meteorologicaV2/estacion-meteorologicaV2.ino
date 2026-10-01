@@ -18,7 +18,7 @@
 
 // ================= CONFIGURACIÓN =================
 #define ESTACION_NUMERO 119
-#define FIRMWARE_VERSION "2.3"  //Envio de respaldo via Bluetooth y actualizacion via OTA
+#define FIRMWARE_VERSION "2.4"  //Actualizacion automatica via OTA
 
 #define MQTT_BROKER "200.44.171.179"
 #define MQTT_PORT 4033
