@@ -16,14 +16,14 @@
 #include <time.h>
 
 // ================= CONFIGURACIÓN =================
-#define ESTACION_NUMERO 1
-#define FIRMWARE_VERSION "2.6"  //comando para ver la MAC via Bluetooth
+#define ESTACION_NUMERO 122
+#define FIRMWARE_VERSION "2.7"  //Comando para forzar la actulizacion de forma manual
 
 // ─── OTA diaria desde GitHub ─────────────────────────────────
 // Archivo JSON con el formato: {"version":"2.5","url":"https://.../firmware.bin"}
 #define OTA_VERSION_URL "https://raw.githubusercontent.com/electronicavultur-maker/Estacion-Meteorologica/main/firmware_version.json"
-#define OTA_HORA_REVISION 3             // Hora (RTC) a partir de la cual se revisa 1 vez al dia
-#define OTA_REINTENTO_MS 1800000UL      // Si la revision falla, reintenta cada 30 min
+#define OTA_HORA_REVISION 3         // Hora (RTC) a partir de la cual se revisa 1 vez al dia
+#define OTA_REINTENTO_MS 1800000UL  // Si la revision falla, reintenta cada 30 min
 
 #define pinH 27
 #define pinAne 34
@@ -298,6 +298,7 @@ void setup() {
       serN = String(ESTACION_NUMERO);
       preferences.putString("serN", serN);
     }
+
 
     configurarAPI();
 
@@ -1000,6 +1001,8 @@ void bluetoothT(void *p) {
       } else if (incoming == "mac") {
         BT.print("Direccion MAC del diaspositivo (Para API key):");
         BT.println(WiFi.macAddress());
+      } else if (incoming == "version") {
+        revisarActualizacionOTA();
       }
     }
     vTaskDelay(1);
@@ -1143,11 +1146,11 @@ void gestionarOTADiaria() {
   DateTime now = rtc.now();
   int claveDia = now.month() * 100 + now.day();
 
-  if (claveDia == ultimoDiaRevisado) return;     // ya se reviso hoy
-  if (now.hour() < OTA_HORA_REVISION) return;    // aun no es la hora
+  if (claveDia == ultimoDiaRevisado) return;   // ya se reviso hoy
+  if (now.hour() < OTA_HORA_REVISION) return;  // aun no es la hora
 
   int m5 = now.minute() % 5;
-  if (m5 < 1 || m5 > 2) return;                  // evitar chocar con mediciones
+  if (m5 < 1 || m5 > 2) return;  // evitar chocar con mediciones
 
   if (hayIntentoPrevio && (millis() - ultimoIntento < OTA_REINTENTO_MS)) return;
   hayIntentoPrevio = true;
