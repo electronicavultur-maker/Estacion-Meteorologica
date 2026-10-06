@@ -67,6 +67,8 @@ bool SD_True = false;
 bool STARTUP_OK = 1;
 float ultimaHumedad = NAN;
 
+volatile bool otaManualSolicitada = false;
+
 // ================= CONSTANTES =================
 
 const float Voltaje_max = 1.9;  // El valor se encuentra en unidades de volts (V)
@@ -334,6 +336,15 @@ void loop() {
   }
 
   asegurarWiFi();
+  if (otaManualSolicitada) {
+    otaManualSolicitada = false;
+    if (WiFi.status() == WL_CONNECTED) {
+      revisarActualizacionOTA();
+    } else {
+      Serial.println(F("[OTA] Sin WiFi, no se puede revisar"));
+      BT.println(F("[OTA] Sin WiFi, no se puede revisar"));
+    }
+  }
   gestionarOTADiaria();
 }
 
@@ -1002,7 +1013,8 @@ void bluetoothT(void *p) {
         BT.print("Direccion MAC del diaspositivo (Para API key):");
         BT.println(WiFi.macAddress());
       } else if (incoming == "version") {
-        revisarActualizacionOTA();
+        BT.println("Revisando actualizacion... el Bluetooth se reiniciara, reconecta en unos segundos");
+        otaManualSolicitada = true;  // lo ejecuta el loop()
       }
     }
     vTaskDelay(1);
