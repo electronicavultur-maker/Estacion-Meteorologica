@@ -17,7 +17,7 @@
 
 // ================= CONFIGURACIÓN =================
 #define ESTACION_NUMERO 122
-#define FIRMWARE_VERSION "2.7"  //Comando para forzar la actulizacion de forma manual
+#define FIRMWARE_VERSION "2.71"  //Comando para forzar la actulizacion de forma manual
 
 // ─── OTA diaria desde GitHub ─────────────────────────────────
 // Archivo JSON con el formato: {"version":"2.5","url":"https://.../firmware.bin"}
