@@ -1,0 +1,13 @@
+1. Agregar el enlace:
+arduino-cli config set board_manager.additional_urls "https://raw.githubusercontent.com/espressif/arduino-esp32/gh-pages/package_esp32_index.json"
+arduino-cli core update-index
+2. Instalar la versión especifica:
+arduino-cli core install esp32:esp32@1.0.6
+3. Verificar:
+arduino-cli core list
+4. Verificar puerto:
+arduino-cli board list
+5. Subir el .bin
+arduino-cli upload -p "puerto" --fqbn esp32:esp32:esp32 --input-file "C:\"direccion-repo"\Estacion-Meteorologica\firmware\firmware-estacion-v2-6.bin"
+Nota: Cambiar la versión por la mas reciente en el repositorio
+6. Conectarse al terminal serial y verificar el correcto funcionamiento
