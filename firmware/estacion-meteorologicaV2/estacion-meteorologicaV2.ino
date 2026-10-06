@@ -17,7 +17,7 @@
 
 // ================= CONFIGURACIÓN =================
 #define ESTACION_NUMERO 122
-#define FIRMWARE_VERSION "2.71"  //Comando para forzar la actulizacion de forma manual
+#define FIRMWARE_VERSION "2.72"  //Integracion de modificaciones parque tecnologico a el pluviometro y debug de pluviometro
 
 // ─── OTA diaria desde GitHub ─────────────────────────────────
 // Archivo JSON con el formato: {"version":"2.5","url":"https://.../firmware.bin"}
@@ -74,7 +74,18 @@ volatile bool otaManualSolicitada = false;
 const float Voltaje_max = 1.9;  // El valor se encuentra en unidades de volts (V)
 const float angulo_max = 360;   // El valor se encuentra en unidades de grados (°)
 
-const float vol = 4;  //Volumen de agua que hace que la cubeta caiga
+const float volumenPorVolcada = 4.8;
+const float radioEmbudo = 9.0;
+const float diametroEmbudo = 18.0;
+
+const float areaEmbudo = 3.14159 * radioEmbudo * radioEmbudo; 
+const float mmPorVolcada = (volumenPorVolcada / areaEmbudo) * 10.0; 
+
+volatile unsigned long tiempoUltimaVolcada = 0;
+const unsigned long tiempoAntirrebote = 350; 
+volatile unsigned int totalVolcadas = 0;     
+
+volatile bool nuevaVolcadaDetectada = false; 
 
 const float R1 = 10;  // 10.000 ohm
 const float R2 = 13.3;
@@ -329,6 +340,11 @@ void setup() {
 }
 
 void loop() {
+  if (nuevaVolcadaDetectada) {
+    noInterrupts();
+    nuevaVolcadaDetectada = false;
+    interrupts();
+  }
   if (deviceMode == MODE_SD) {
     SDloop();
   } else {
@@ -749,7 +765,7 @@ void actualizarSensores(AcumuladosSensores &S) {
   Sensores s;
   s.T = bmp.readTemperature();
   s.H = (leerHumedadFiltrada() + 10.315808) / 1.0829217;
-  s.Precp = pulsosPl * vol;
+  s.Precp = pulsosPl * mmPorVolcada;
   pulsosPl = 0;
 
   BT.println("--- Lectura de sensores ---");
@@ -770,6 +786,7 @@ void actualizarSensores(AcumuladosSensores &S) {
     S.humMin = s.H;
 
   S.precipitacion += s.Precp;
+  BT.println("Precipitacion acumulada: " + String(S.precipitacion) + " mm");
 
   S.muestras++;
 }
@@ -836,13 +853,17 @@ bool tMedidas(int conf, int minutos, int segundos) {
   }
 }
 
-void contar() {
-  static unsigned long ultimo_tiempo_interrupcion = 0;
-  unsigned long tiempo_interrupcion = millis();
-  if (tiempo_interrupcion - ultimo_tiempo_interrupcion > 600) {  //condicion para evitar rebotes
+void IRAM_ATTR contar() {
+
+  unsigned long tiempoActual = millis();
+  if (tiempoActual - tiempoUltimaVolcada > tiempoAntirrebote) {  //condicion para evitar rebotes
     pulsosPl++;
+    nuevaVolcadaDetectada = true;
+    BT.println("Sumando un pulso");
+    BT.print("Total de pulsos: ");
+    BT.println(pulsosPl);
+    tiempoUltimaVolcada = tiempoActual;
   }
-  ultimo_tiempo_interrupcion = tiempo_interrupcion;
 }
 
 void guardarRespaldoSD(Medidas M) {
