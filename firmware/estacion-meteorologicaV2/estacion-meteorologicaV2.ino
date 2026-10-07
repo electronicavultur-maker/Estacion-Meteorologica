@@ -16,8 +16,8 @@
 #include <time.h>
 
 // ================= CONFIGURACIÓN =================
-#define ESTACION_NUMERO 122
-#define FIRMWARE_VERSION "2.72"  //Integracion de modificaciones parque tecnologico a el pluviometro y debug de pluviometro
+#define ESTACION_NUMERO 1
+#define FIRMWARE_VERSION "2.73"  //Integracion de modificaciones parque tecnologico a el pluviometro y debug de pluviometro
 
 // ─── OTA diaria desde GitHub ─────────────────────────────────
 // Archivo JSON con el formato: {"version":"2.5","url":"https://.../firmware.bin"}
@@ -430,6 +430,7 @@ void SDloop() {
     BT.println("Velocidad Minima del Viento: " + String(M.viento_vel_min_ms) + " m/s");
     BT.println("Moda Dirección del Viento: " + String(M.viento_dir_moda_deg) + " °");
     BT.println("Presión Atmosférica: " + String(M.presion_atmos_hpa) + " Pa");
+    BT.println("Precipitación Acumulada: " + String(M.precipitacion_mm) + " mm");
     BT.println("Fecha: " + String(now.day()) + "/" + String(now.month()) + "/" + String(now.year()));
     BT.println("Hora: " + String(now.hour()) + ":" + String(now.minute()) + ":" + String(now.second()));
     digitalWrite(Ok, LOW);
@@ -565,6 +566,7 @@ void regLoop() {
     BT.println("Velocidad Minima del Viento: " + String(M.viento_vel_min_ms) + " m/s");
     BT.println("Moda Dirección del Viento: " + String(M.viento_dir_moda_deg) + " °");
     BT.println("Presión Atmosférica: " + String(M.presion_atmos_hpa) + " Pa");
+    BT.println("Precipitación Acumulada: " + String(M.precipitacion_mm) + " mm");
     BT.println("Fecha: " + String(now.day()) + "/" + String(now.month()) + "/" + String(now.year()));
     BT.println("Hora: " + String(now.hour()) + ":" + String(now.minute()) + ":" + String(now.second()));
 
