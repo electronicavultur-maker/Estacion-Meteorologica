@@ -17,7 +17,7 @@
 
 // ================= CONFIGURACIÓN =================
 #define ESTACION_NUMERO 1
-#define FIRMWARE_VERSION "2.73"  //Integracion de modificaciones parque tecnologico a el pluviometro y debug de pluviometro
+#define FIRMWARE_VERSION "2.74"  //Integracion de modificaciones parque tecnologico a el pluviometro y debug de pluviometro
 
 // ─── OTA diaria desde GitHub ─────────────────────────────────
 // Archivo JSON con el formato: {"version":"2.5","url":"https://.../firmware.bin"}
@@ -71,7 +71,7 @@ volatile bool otaManualSolicitada = false;
 
 // ================= CONSTANTES =================
 
-const float Voltaje_max = 1.9;  // El valor se encuentra en unidades de volts (V)
+const float Voltaje_max = 3.3;  // El valor se encuentra en unidades de volts (V)
 const float angulo_max = 360;   // El valor se encuentra en unidades de grados (°)
 
 const float volumenPorVolcada = 4.8;
