@@ -17,7 +17,7 @@
 
 // ================= CONFIGURACIÓN =================
 #define ESTACION_NUMERO 1
-#define FIRMWARE_VERSION "2.74"  //Integracion de modificaciones parque tecnologico a el pluviometro y debug de pluviometro
+#define FIRMWARE_VERSION "2.75"  //Integracion de modificaciones parque tecnologico a el pluviometro y debug de pluviometro
 
 // ─── OTA diaria desde GitHub ─────────────────────────────────
 // Archivo JSON con el formato: {"version":"2.5","url":"https://.../firmware.bin"}
@@ -250,6 +250,7 @@ int sendPostRequest(DateTime now, Medidas m);
 int sendPostRequestFromJson(String paquete);
 void gestionarOTADiaria();
 bool revisarActualizacionOTA();
+void reiniciarPorOTA();
 bool obtenerInfoOTA(String &version, String &url);
 void ejecutarOTA(const String &version, const String &url);
 bool versionEsMayor(String nueva, String actual);
@@ -356,6 +357,7 @@ void loop() {
     otaManualSolicitada = false;
     if (WiFi.status() == WL_CONNECTED) {
       revisarActualizacionOTA();
+      reiniciarPorOTA();  // el BT quedo apagado: reiniciar para recuperarlo
     } else {
       Serial.println(F("[OTA] Sin WiFi, no se puede revisar"));
       BT.println(F("[OTA] Sin WiFi, no se puede revisar"));
@@ -1172,9 +1174,13 @@ bool scanI2C() {
 // La revision solo arranca 1-2 minutos despues de una marca de 5 min,
 // para no pisar las mediciones (que se toman en minutos multiplos de 5).
 void gestionarOTADiaria() {
+  // El estado se guarda en NVS porque el equipo se reinicia despues de cada revision
+  static bool cargado = false;
   static int ultimoDiaRevisado = -1;
-  static unsigned long ultimoIntento = 0;
-  static bool hayIntentoPrevio = false;
+  if (!cargado) {
+    ultimoDiaRevisado = preferences.getInt("otaDia", -1);
+    cargado = true;
+  }
 
   if (WiFi.status() != WL_CONNECTED) return;
 
@@ -1187,13 +1193,23 @@ void gestionarOTADiaria() {
   int m5 = now.minute() % 5;
   if (m5 < 1 || m5 > 2) return;  // evitar chocar con mediciones
 
-  if (hayIntentoPrevio && (millis() - ultimoIntento < OTA_REINTENTO_MS)) return;
-  hayIntentoPrevio = true;
-  ultimoIntento = millis();
+  uint32_t ahora = now.unixtime();
+  uint32_t ultimoIntento = preferences.getUInt("otaTs", 0);
+  if (ultimoIntento != 0 && ahora >= ultimoIntento && (ahora - ultimoIntento) < (OTA_REINTENTO_MS / 1000)) return;
+  preferences.putUInt("otaTs", ahora);
 
   if (revisarActualizacionOTA()) {
-    ultimoDiaRevisado = claveDia;  // consulta exitosa: no volver a revisar hasta manana
+    preferences.putInt("otaDia", claveDia);  // consulta exitosa: no volver a revisar hasta manana
   }
+  reiniciarPorOTA();  // el BT quedo apagado: reiniciar para recuperarlo
+}
+
+// BT.begin() despues de BT.end() no es confiable en el ESP32 (el equipo aparece
+// pero rechaza la conexion), por eso se reinicia para dejar el Bluetooth funcionando.
+void reiniciarPorOTA() {
+  Serial.println(F("[OTA] Reiniciando para restaurar el Bluetooth..."));
+  delay(1000);
+  ESP.restart();
 }
 
 // Devuelve true si pudo consultar el JSON (haya o no actualizacion).
@@ -1219,8 +1235,7 @@ bool revisarActualizacionOTA() {
     }
   }
 
-  // Si llegamos aqui no se actualizo: reactivar Bluetooth
-  BT.begin(("Estacion Meteorologica_" + String(serN)).c_str());
+  // Si llegamos aqui no se actualizo. El BT sigue apagado: el que llama reinicia el equipo.
   return consultaOK;
 }
 
