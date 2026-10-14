@@ -17,7 +17,7 @@
 
 // ================= CONFIGURACIÓN =================
 #define ESTACION_NUMERO 1
-#define FIRMWARE_VERSION "2.75"  //Integracion de modificaciones parque tecnologico a el pluviometro y debug de pluviometro
+#define FIRMWARE_VERSION "2.76"  //Correccion de problemas con el pluviometro y la nueva logica de actualizacion
 
 // ─── OTA diaria desde GitHub ─────────────────────────────────
 // Archivo JSON con el formato: {"version":"2.5","url":"https://.../firmware.bin"}
@@ -82,7 +82,7 @@ const float areaEmbudo = 3.14159 * radioEmbudo * radioEmbudo;
 const float mmPorVolcada = (volumenPorVolcada / areaEmbudo) * 10.0; 
 
 volatile unsigned long tiempoUltimaVolcada = 0;
-const unsigned long tiempoAntirrebote = 350; 
+const unsigned long tiempoAntirrebote = 500; 
 volatile unsigned int totalVolcadas = 0;     
 
 volatile bool nuevaVolcadaDetectada = false; 
@@ -344,7 +344,11 @@ void loop() {
   if (nuevaVolcadaDetectada) {
     noInterrupts();
     nuevaVolcadaDetectada = false;
+    int totalPulsos = pulsosPl;
     interrupts();
+    BT.println("Sumando un pulso");
+    BT.println("Total de pulsos: " + String(totalPulsos));
+    Serial.println("Total de pulsos: " + String(totalPulsos));
   }
   if (deviceMode == MODE_SD) {
     SDloop();
@@ -862,10 +866,7 @@ void IRAM_ATTR contar() {
   unsigned long tiempoActual = millis();
   if (tiempoActual - tiempoUltimaVolcada > tiempoAntirrebote) {  //condicion para evitar rebotes
     pulsosPl++;
-    nuevaVolcadaDetectada = true;
-    BT.println("Sumando un pulso");
-    BT.print("Total de pulsos: ");
-    BT.println(pulsosPl);
+    nuevaVolcadaDetectada = true;  // el mensaje de debug se imprime desde loop()
     tiempoUltimaVolcada = tiempoActual;
   }
 }
