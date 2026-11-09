@@ -71,21 +71,39 @@ volatile bool otaManualSolicitada = false;
 
 // ================= CONSTANTES =================
 
-const float Voltaje_max = 3.3;  // El valor se encuentra en unidades de volts (V)
-const float angulo_max = 360;   // El valor se encuentra en unidades de grados (°)
+// ---------- CALIBRACIÓN DE LA VELETA ----------
+// 1) Gira la veleta a mano a un extremo y otro, mira en el Serial "Veleta mV"
+//    y anota el mínimo y el máximo reales.
+const float VANE_MV_MIN = 100.0;   // mV en un extremo de la pista (AJUSTAR)
+const float VANE_MV_MAX = 3200.0;  // mV en el otro extremo (AJUSTAR)
+// 2) Apunta la veleta hacia el NORTE real y lee el ángulo mostrado;
+//    ese valor se pone aquí para que el Norte quede en 0°.
+const float NORTE_OFFSET = 0.0;  // grados (AJUSTAR)
+// Margen para detectar la zona muerta (cursor sin contacto)
+const float MARGEN_MV = 40.0;
+
+// Variables del anemómetro
+float maxVelocidad = 0.0;
+float minVelocidad = 999.0;
+float promedioVelocidad = 0.0;
+bool primeraLectura = true;
+
+// Variables de la veleta
+float anguloVeleta = 0.0;
+
 
 const float volumenPorVolcada = 4.8;
 const float radioEmbudo = 9.0;
 const float diametroEmbudo = 18.0;
 
-const float areaEmbudo = 3.14159 * radioEmbudo * radioEmbudo; 
-const float mmPorVolcada = (volumenPorVolcada / areaEmbudo) * 10.0; 
+const float areaEmbudo = 3.14159 * radioEmbudo * radioEmbudo;
+const float mmPorVolcada = (volumenPorVolcada / areaEmbudo) * 10.0;
 
 volatile unsigned long tiempoUltimaVolcada = 0;
-const unsigned long tiempoAntirrebote = 500; 
-volatile unsigned int totalVolcadas = 0;     
+const unsigned long tiempoAntirrebote = 500;
+volatile unsigned int totalVolcadas = 0;
 
-volatile bool nuevaVolcadaDetectada = false; 
+volatile bool nuevaVolcadaDetectada = false;
 
 const float R1 = 10;  // 10.000 ohm
 const float R2 = 13.3;
@@ -262,6 +280,7 @@ void bluetoothT(void *p);
 void setup() {
   // put your setup code here, to run once:
   Serial.begin(9600);  //Inicializacion del puerto serial
+  analogSetAttenuation(ADC_11db);
   delay(5000);
 
   pinMode(Indef, OUTPUT);
@@ -800,26 +819,71 @@ void actualizarSensores(AcumuladosSensores &S) {
 }
 
 void actualizarAnemometro(AcumuladosAnemometro &A) {
+  long suma_mV = 0;
+  long sumaVeleta_mV = 0;
+  const int numMuestras = 30;
 
+  for (int i = 0; i < numMuestras; i++) {
+    suma_mV += analogReadMilliVolts(pinAne);
+    sumaVeleta_mV += analogReadMilliVolts(pinVel);
+    delay(2);
+  }
 
-  float anemometro = analogRead(pinAne) * 3300.0 / 4095;
-  V1 = analogRead(pinVel) * 3.3 / 4095;
-  if (V1 > Voltaje_max)
-    V1 = Voltaje_max;
-  float angulo = ((V1)*angulo_max) / Voltaje_max;
+  // ---------- ANEMÓMETRO ----------
+  float voltaje_mV = (float)suma_mV / numMuestras;
+  float velocidadKmH = 0.0;
 
-  A.sumaVelocidad += anemometro;
-  if (anemometro > A.velMax)
-    A.velMax = anemometro;
+  if (voltaje_mV > 200.0) {
+    velocidadKmH = 9.04 - (0.00185 * voltaje_mV) + (0.0000307 * voltaje_mV * voltaje_mV);
+  }
 
-  if (anemometro < A.velMin)
-    A.velMin = anemometro;
+  A.sumaVelocidad += velocidadKmH;
+  if (velocidadKmH > A.velMax)
+    A.velMax = velocidadKmH;
+
+  if (velocidadKmH > 0.0) {
+    if (velocidadKmH < A.velMin)
+      A.velMin = velocidadKmH;
+  }
 
   A.muestras++;
 
-  int sector = ((int)angulo) / 10;
+  // ---------- VELETA ----------
+  float veleta_mV = (float)sumaVeleta_mV / numMuestras;
+
+  // Zona muerta: el cursor no toca la pista (lectura fuera del rango calibrado)
+  if (veleta_mV >= (VANE_MV_MIN - MARGEN_MV) && veleta_mV <= (VANE_MV_MAX + MARGEN_MV)) {
+    float v = constrain(veleta_mV, VANE_MV_MIN, VANE_MV_MAX);
+    float angulo = (v - VANE_MV_MIN) / (VANE_MV_MAX - VANE_MV_MIN) * 360.0;
+    angulo -= NORTE_OFFSET;
+    if (angulo < 0) angulo += 360.0;
+    if (angulo >= 360.0) angulo -= 360.0;
+    anguloVeleta = angulo;
+  }
+
+  int sector = ((int)anguloVeleta) / 10;
   sector %= 36;
   A.histograma[sector]++;
+
+  //DEBUG
+  Serial.print("Voltaje Real: ");
+  Serial.print(voltaje_mV, 1);
+  Serial.print(" mV | Vel Actual: ");
+  Serial.print(velocidadKmH, 2);
+  Serial.print(" km/h | MAX: ");
+  Serial.print(A.velMax, 2);
+  Serial.print(" | MIN: ");
+  if (A.velMin == 999.0) {
+    Serial.print(0.00);
+  } else {
+    Serial.print(A.velMin, 2);
+  }
+  Serial.print(" || Veleta mV: ");
+  Serial.print(veleta_mV, 1);
+  Serial.print(" | Dir: ");
+  Serial.print(anguloVeleta, 0);
+  Serial.print("° ");
+  Serial.println();
 }
 
 float calcularPuntoRocio(float T, float HR) {
