@@ -17,7 +17,7 @@
 
 // ================= CONFIGURACIÓN =================
 #define ESTACION_NUMERO 1
-#define FIRMWARE_VERSION "2.76"  //Correccion de problemas con el pluviometro y la nueva logica de actualizacion
+#define FIRMWARE_VERSION "2.77"  //Correccion de problemas con el pluviometro y la nueva logica de actualizacion
 
 // ─── OTA diaria desde GitHub ─────────────────────────────────
 // Archivo JSON con el formato: {"version":"2.5","url":"https://.../firmware.bin"}
