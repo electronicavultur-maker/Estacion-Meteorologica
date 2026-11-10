@@ -17,8 +17,7 @@
 
 // ================= CONFIGURACIÓN =================
 #define ESTACION_NUMERO 1
-#define FIRMWARE_VERSION "2.77"  //Correccion de problemas con el pluviometro y la nueva logica de actualizacion
-
+#define FIRMWARE_VERSION "2.78"  //Correccion de calibracion veleta/anemometro
 // ─── OTA diaria desde GitHub ─────────────────────────────────
 // Archivo JSON con el formato: {"version":"2.5","url":"https://.../firmware.bin"}
 #define OTA_VERSION_URL "https://raw.githubusercontent.com/electronicavultur-maker/Estacion-Meteorologica/main/firmware_version.json"
@@ -71,16 +70,6 @@ volatile bool otaManualSolicitada = false;
 
 // ================= CONSTANTES =================
 
-// ---------- CALIBRACIÓN DE LA VELETA ----------
-// 1) Gira la veleta a mano a un extremo y otro, mira en el Serial "Veleta mV"
-//    y anota el mínimo y el máximo reales.
-const float VANE_MV_MIN = 100.0;   // mV en un extremo de la pista (AJUSTAR)
-const float VANE_MV_MAX = 3200.0;  // mV en el otro extremo (AJUSTAR)
-// 2) Apunta la veleta hacia el NORTE real y lee el ángulo mostrado;
-//    ese valor se pone aquí para que el Norte quede en 0°.
-const float NORTE_OFFSET = 0.0;  // grados (AJUSTAR)
-// Margen para detectar la zona muerta (cursor sin contacto)
-const float MARGEN_MV = 40.0;
 
 // Variables del anemómetro
 float maxVelocidad = 0.0;
@@ -820,12 +809,12 @@ void actualizarSensores(AcumuladosSensores &S) {
 
 void actualizarAnemometro(AcumuladosAnemometro &A) {
   long suma_mV = 0;
-  long sumaVeleta_mV = 0;
+  long sumaVeleta = 0;
   const int numMuestras = 30;
 
   for (int i = 0; i < numMuestras; i++) {
     suma_mV += analogReadMilliVolts(pinAne);
-    sumaVeleta_mV += analogReadMilliVolts(pinVel);
+    sumaVeleta += analogRead(pinVel);
     delay(2);
   }
 
@@ -833,7 +822,7 @@ void actualizarAnemometro(AcumuladosAnemometro &A) {
   float voltaje_mV = (float)suma_mV / numMuestras;
   float velocidadKmH = 0.0;
 
-  if (voltaje_mV > 200.0) {
+  if (voltaje_mV > 142.0) {
     velocidadKmH = 9.04 - (0.00185 * voltaje_mV) + (0.0000307 * voltaje_mV * voltaje_mV);
   }
 
@@ -849,17 +838,8 @@ void actualizarAnemometro(AcumuladosAnemometro &A) {
   A.muestras++;
 
   // ---------- VELETA ----------
-  float veleta_mV = (float)sumaVeleta_mV / numMuestras;
-
-  // Zona muerta: el cursor no toca la pista (lectura fuera del rango calibrado)
-  if (veleta_mV >= (VANE_MV_MIN - MARGEN_MV) && veleta_mV <= (VANE_MV_MAX + MARGEN_MV)) {
-    float v = constrain(veleta_mV, VANE_MV_MIN, VANE_MV_MAX);
-    float angulo = (v - VANE_MV_MIN) / (VANE_MV_MAX - VANE_MV_MIN) * 360.0;
-    angulo -= NORTE_OFFSET;
-    if (angulo < 0) angulo += 360.0;
-    if (angulo >= 360.0) angulo -= 360.0;
-    anguloVeleta = angulo;
-  }
+  float veleta = (float)sumaVeleta / numMuestras;
+  anguloVeleta = (veleta * 360) / 4095.0;
 
   int sector = ((int)anguloVeleta) / 10;
   sector %= 36;
@@ -878,8 +858,8 @@ void actualizarAnemometro(AcumuladosAnemometro &A) {
   } else {
     Serial.print(A.velMin, 2);
   }
-  Serial.print(" || Veleta mV: ");
-  Serial.print(veleta_mV, 1);
+  Serial.print(" || Veleta: ");
+  Serial.print(veleta, 1);
   Serial.print(" | Dir: ");
   Serial.print(anguloVeleta, 0);
   Serial.print("° ");
