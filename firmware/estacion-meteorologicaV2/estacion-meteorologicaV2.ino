@@ -12,12 +12,14 @@
 #include <BluetoothSerial.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
+#include <freertos/semphr.h>
+#include <stdarg.h>
 #include <Preferences.h>
 #include <time.h>
 
 // ================= CONFIGURACIÓN =================
 #define ESTACION_NUMERO 1
-#define FIRMWARE_VERSION "2.78"  //Correccion de calibracion veleta/anemometro
+#define FIRMWARE_VERSION "2.79"  //Mejora de los logs
 // ─── OTA diaria desde GitHub ─────────────────────────────────
 // Archivo JSON con el formato: {"version":"2.5","url":"https://.../firmware.bin"}
 #define OTA_VERSION_URL "https://raw.githubusercontent.com/electronicavultur-maker/Estacion-Meteorologica/main/firmware_version.json"
@@ -53,6 +55,20 @@ Adafruit_BMP280 bmp;
 RTC_DS1307 rtc;
 
 File myFile;
+
+// ================= SISTEMA DE LOGS =================
+// Niveles de cada mensaje
+enum NivelLog { NIVEL_ERROR = 0,
+                NIVEL_INFO = 1,
+                NIVEL_DEBUG = 2 };
+
+// Modo de log elegido (se cambia por Bluetooth con los comandos "debug" / "production")
+enum ModoLog { MODO_PRODUCTION,
+               MODO_DEBUG };
+
+volatile ModoLog modoLog = MODO_PRODUCTION;  // Estandar: production
+volatile bool btActivo = false;              // true solo cuando el Bluetooth esta iniciado
+SemaphoreHandle_t logMutex = NULL;           // Evita mezclar mensajes entre loop() y la tarea Bluetooth
 
 // ================= VARIABLES =================
 
@@ -265,10 +281,21 @@ String extraerCampoJson(const String &json, const char *campo);
 
 void bluetoothT(void *p);
 
+// Logs
+bool logSerialPermitido(NivelLog nivel);
+bool logBTPermitido(NivelLog nivel);
+void logMsg(NivelLog nivel, const String &msg);
+void logPrintf(NivelLog nivel, const char *fmt, ...);
+void logInfo(const String &msg);
+void logDebug(const String &msg);
+void logError(const String &msg);
+void logResumenMedidas(DateTime now);
+
 
 void setup() {
   // put your setup code here, to run once:
   Serial.begin(9600);  //Inicializacion del puerto serial
+  logMutex = xSemaphoreCreateMutex();
   analogSetAttenuation(ADC_11db);
   delay(5000);
 
@@ -289,14 +316,14 @@ void setup() {
   if (STARTUP_OK) {
     rtc.begin();
     if (!rtc.isrunning()) {
-      Serial.println(F("RTC no está configurado, ajustando hora..."));
+      logInfo(F("RTC no está configurado, ajustando hora..."));
       rtc.adjust(DateTime(F(__DATE__), F(__TIME__)));
     }
 
     // ---- SD ----
-    Serial.println(F("Inicializando SD"));
+    logInfo(F("Inicializando SD"));
     if (!SD.begin(5)) {
-      Serial.println(F("No se pudo inicializar SD"));
+      logError(F("No se pudo inicializar SD"));
       SD_True = false;
       deviceMode = MODE_SIMPLE;
       digitalWrite(Error, HIGH);
@@ -326,23 +353,23 @@ void setup() {
 
     // ---- WIFI ----
     WiFi.begin(ssid.c_str(), password.c_str());
-    Serial.println(WiFi.macAddress());
+    logInfo("MAC: " + WiFi.macAddress());
 
     asegurarWiFi();
 
     BT.begin(("Estacion Meteorologica_" + String(serN)).c_str());  //Inicializacion de Bluetooth
+    btActivo = true;
     xTaskCreate(bluetoothT, "bluetooth", 4096, NULL, 1, NULL);     //Inicializacion de la tarea para la conexion Bluetooth
     digitalWrite(Indef, HIGH);
     delay(1000);
     digitalWrite(Indef, LOW);
-    Serial.println(F("inicializacion exitosa"));
-    BT.println(F("inicializacion exitosa"));
+    logInfo(F("inicializacion exitosa"));
     digitalWrite(Error, LOW);
   } else {
     while (1) {
       digitalWrite(Error, HIGH);
       delay(1000);
-      Serial.println("Error iniciando BMP280 o RTC");
+      logError("Error iniciando BMP280 o RTC");
       digitalWrite(Error, LOW);
     }
   }
@@ -354,9 +381,8 @@ void loop() {
     nuevaVolcadaDetectada = false;
     int totalPulsos = pulsosPl;
     interrupts();
-    BT.println("Sumando un pulso");
-    BT.println("Total de pulsos: " + String(totalPulsos));
-    Serial.println("Total de pulsos: " + String(totalPulsos));
+    logDebug("Sumando un pulso");
+    logDebug("Total de pulsos: " + String(totalPulsos));
   }
   if (deviceMode == MODE_SD) {
     SDloop();
@@ -371,8 +397,7 @@ void loop() {
       revisarActualizacionOTA();
       reiniciarPorOTA();  // el BT quedo apagado: reiniciar para recuperarlo
     } else {
-      Serial.println(F("[OTA] Sin WiFi, no se puede revisar"));
-      BT.println(F("[OTA] Sin WiFi, no se puede revisar"));
+      logError(F("[OTA] Sin WiFi, no se puede revisar"));
     }
   }
   gestionarOTADiaria();
@@ -381,18 +406,15 @@ void loop() {
 void SDloop() {
   DateTime now = rtc.now();
   if (tMedidas(1, now.minute(), now.second())) {
-    BT.println("Tomando las medidas por minuto (Radiancia Solar e Insolacion)");
-    Serial.println("Tomando las medidas por minuto (Radiancia Solar e Insolacion)");
+    logInfo("Tomando las medidas por minuto (Radiancia Solar e Insolacion)");
     leerRadiancia();
   }
   if (tMedidas(2, now.minute(), now.second())) {
-    BT.println("Tomando las medidas de 5 minutos (Temperatura, Humedad, Precipitacion)");
-    Serial.println("Tomando las medidas de 5 minutos (Temperatura, Humedad, Precipitacion)");
+    logInfo("Tomando las medidas de 5 minutos (Temperatura, Humedad, Precipitacion)");
     actualizarSensores(S);
   }
   if (tMedidas(3, now.minute(), now.second())) {
-    BT.println("Calculando las medidas al final de la hora y preparando para enviar (Punto rocio y presion)");
-    Serial.println("Calculando las medidas al final de la hora y preparando para enviar (Punto rocio y presion)");
+    logInfo("Calculando las medidas al final de la hora y preparando para enviar (Punto rocio y presion)");
     if (S.muestras > 0) {
       M.temp_aire_prom_c = S.sumaTemp / S.muestras;
       M.humedad_rel_prom = S.sumaHum / S.muestras;
@@ -429,24 +451,7 @@ void SDloop() {
     M.presion_atmos_hpa = bmp.readPressure() / 100;
 
     asegurarWiFi();
-    BT.println("--- Lectura de sensores ---");
-    BT.println("Temperatura Promedio del Aire: " + String(M.temp_aire_prom_c) + " C");
-    BT.println("Temperatura Maxima del Aire: " + String(M.temp_aire_max_c) + " C");
-    BT.println("Temperatura Minima del Aire: " + String(M.temp_aire_min_c) + " C");
-    BT.println("Punto de Rocio Calculado: " + String(M.punto_rocio_c) + " C");
-    BT.println("Humedad Relativa Promedio: " + String(M.humedad_rel_prom) + " %");
-    BT.println("Humedad Relativa Maxima: " + String(M.humedad_rel_max) + " %");
-    BT.println("Humedad Relativa Minima: " + String(M.humedad_rel_min) + " %");
-    BT.println("Radiancia Solar: " + String(M.radiacion_solar_w_m2) + " W/m2");
-    BT.println("Insolación: " + String(M.insolacion_horas) + " h");
-    BT.println("Velocidad del Viento Promedio: " + String(M.viento_vel_prom_ms) + " m/s");
-    BT.println("Velocidad Máxima del Viento: " + String(M.viento_vel_max_ms) + " m/s");
-    BT.println("Velocidad Minima del Viento: " + String(M.viento_vel_min_ms) + " m/s");
-    BT.println("Moda Dirección del Viento: " + String(M.viento_dir_moda_deg) + " °");
-    BT.println("Presión Atmosférica: " + String(M.presion_atmos_hpa) + " Pa");
-    BT.println("Precipitación Acumulada: " + String(M.precipitacion_mm) + " mm");
-    BT.println("Fecha: " + String(now.day()) + "/" + String(now.month()) + "/" + String(now.year()));
-    BT.println("Hora: " + String(now.hour()) + ":" + String(now.minute()) + ":" + String(now.second()));
+    logResumenMedidas(now);
     digitalWrite(Ok, LOW);
     digitalWrite(Error, LOW);
 
@@ -474,36 +479,34 @@ void SDloop() {
 
       int r = sendPostRequest(now, M);
       if (r != 201) {
-        BT.print("Error ");
-        BT.print(r);
-        BT.println(" al intentar enviar la informacion al servidor, guardando en la memoria");
+        logError("Error " + String(r) + " al intentar enviar la informacion al servidor, guardando en la memoria");
         guardarRespaldoSD(M);
 
       } else {
         digitalWrite(Ok, HIGH);
-        BT.println("Datos enviados con exito al servidor");
+        logInfo("Datos enviados con exito al servidor");
         myFile = SD.open("/resp.csv", FILE_READ);
         if (myFile) {
           int cantL = 0;
           while (myFile.available()) {
             cantL++;
-            BT.println("Enviando datos en memoria");
+            logDebug("Enviando datos en memoria");
             String linea = myFile.readStringUntil('\n');
             int respReintento = sendPostRequestFromJson(linea);
             if (respReintento != 201) {
-              BT.println("Error enviando");
+              logError("Error enviando");
               cantL--;
               break;
             }
           }
-          BT.println("Se enviaron " + String(cantL) + " Lineas de datos");
+          logInfo("Se enviaron " + String(cantL) + " Lineas de datos");
           myFile.close();
           if (SD.remove("/resp.csv")) {
           }
         }
       }
     } else {
-      BT.println("Sin conexion a internet, guardando en la memoria");
+      logError("Sin conexion a internet, guardando en la memoria");
       guardarRespaldoSD(M);
     }
 
@@ -518,18 +521,15 @@ void SDloop() {
 void regLoop() {
   DateTime now = rtc.now();
   if (tMedidas(1, now.minute(), now.second())) {
-    BT.println("Tomando las medidas por minuto (Radiancia Solar e Insolacion)");
-    Serial.println("Tomando las medidas por minuto (Radiancia Solar e Insolacion)");
+    logInfo("Tomando las medidas por minuto (Radiancia Solar e Insolacion)");
     leerRadiancia();
   }
   if (tMedidas(2, now.minute(), now.second())) {
-    BT.println("Tomando las medidas de 5 minutos (Temperatura, Humedad, Precipitacion)");
-    Serial.println("Tomando las medidas de 5 minutos (Temperatura, Humedad, Precipitacion)");
+    logInfo("Tomando las medidas de 5 minutos (Temperatura, Humedad, Precipitacion)");
     actualizarSensores(S);
   }
   if (tMedidas(3, now.minute(), now.second())) {
-    BT.println("Calculando las medidas al final de la hora y preparando para enviar (Punto rocio y presion)");
-    Serial.println("Calculando las medidas al final de la hora y preparando para enviar (Punto rocio y presion)");
+    logInfo("Calculando las medidas al final de la hora y preparando para enviar (Punto rocio y presion)");
     if (S.muestras > 0) {
       M.temp_aire_prom_c = S.sumaTemp / S.muestras;
       M.humedad_rel_prom = S.sumaHum / S.muestras;
@@ -565,24 +565,7 @@ void regLoop() {
     M.presion_atmos_hpa = bmp.readPressure() / 100;
 
     asegurarWiFi();
-    BT.println("--- Lectura de sensores ---");
-    BT.println("Temperatura Promedio del Aire: " + String(M.temp_aire_prom_c) + " C");
-    BT.println("Temperatura Maxima del Aire: " + String(M.temp_aire_max_c) + " C");
-    BT.println("Temperatura Minima del Aire: " + String(M.temp_aire_min_c) + " C");
-    BT.println("Punto de Rocio Calculado: " + String(M.punto_rocio_c) + " C");
-    BT.println("Humedad Relativa Promedio: " + String(M.humedad_rel_prom) + " %");
-    BT.println("Humedad Relativa Maxima: " + String(M.humedad_rel_max) + " %");
-    BT.println("Humedad Relativa Minima: " + String(M.humedad_rel_min) + " %");
-    BT.println("Radiancia Solar: " + String(M.radiacion_solar_w_m2) + " W/m2");
-    BT.println("Insolación: " + String(M.insolacion_horas) + " h");
-    BT.println("Velocidad del Viento Promedio: " + String(M.viento_vel_prom_ms) + " m/s");
-    BT.println("Velocidad Máxima del Viento: " + String(M.viento_vel_max_ms) + " m/s");
-    BT.println("Velocidad Minima del Viento: " + String(M.viento_vel_min_ms) + " m/s");
-    BT.println("Moda Dirección del Viento: " + String(M.viento_dir_moda_deg) + " °");
-    BT.println("Presión Atmosférica: " + String(M.presion_atmos_hpa) + " Pa");
-    BT.println("Precipitación Acumulada: " + String(M.precipitacion_mm) + " mm");
-    BT.println("Fecha: " + String(now.day()) + "/" + String(now.month()) + "/" + String(now.year()));
-    BT.println("Hora: " + String(now.hour()) + ":" + String(now.minute()) + ":" + String(now.second()));
+    logResumenMedidas(now);
 
     digitalWrite(Ok, LOW);
     digitalWrite(Error, LOW);
@@ -602,15 +585,13 @@ void regLoop() {
       M.fecha_hora = now;
       int r = sendPostRequest(now, M);
       if (r != 201) {
-        BT.print("Error ");
-        BT.print(r);
-        BT.println(" al intentar enviar la información al servidor");
+        logError("Error " + String(r) + " al intentar enviar la información al servidor");
         digitalWrite(Error, HIGH);
       } else {
         digitalWrite(Ok, HIGH);
-        BT.println("Datos enviados con exito al servidor");
+        logInfo("Datos enviados con exito al servidor");
       }
-    } else BT.println("Sin conexión a internet");
+    } else logError("Sin conexión a internet");
 
 
     M.reset();
@@ -624,13 +605,12 @@ void regLoop() {
 // ================= WIFI =================
 void configurarAPI() {
   if (apiEndpoint.length() > 0) {
-    Serial.println(apiEndpoint);
-    BT.println(apiEndpoint);
+    logInfo("API: " + apiEndpoint);
     return;
   }
   apiEndpoint = "http://200.44.171.179:4069/api/stations/" + String(serN) + "/medidas";
   preferences.putString("apiURL", apiEndpoint);
-  Serial.println(apiEndpoint);
+  logInfo("API: " + apiEndpoint);
 }
 
 bool asegurarWiFi() {
@@ -667,8 +647,7 @@ int sendPostRequest(DateTime now, Medidas M) {
 
   // Configura la solicitud POST
   http.begin(apiEndpoint);
-  BT.println("Endpoint: ");
-  BT.println(apiEndpoint);
+  logDebug("Endpoint: " + apiEndpoint);
   http.addHeader("Content-Type", "application/json");
   http.addHeader("X-API-KEY", WiFi.macAddress());
   char fecha[25];
@@ -707,22 +686,20 @@ int sendPostRequest(DateTime now, Medidas M) {
   jsonBody += ",\"viento_recorrido_km\":" + String(M.viento_recorrido_km, 2);
   jsonBody += ",\"presion_atmos_hpa\":" + String(M.presion_atmos_hpa, 2);
   jsonBody += "}";
-  BT.println("JSON enviado: " + jsonBody);
+  logDebug("JSON enviado: " + jsonBody);
 
   // Realiza la solicitud POST
   int httpResponseCode = http.POST(jsonBody);
 
   // Maneja la respuesta del servidor
   if (httpResponseCode > 0) {
-    BT.print("Respuesta del servidor: ");
-    BT.println(httpResponseCode);
+    logDebug("Respuesta del servidor: " + String(httpResponseCode));
     if (httpResponseCode == 201) {
       digitalWrite(Ok, HIGH);
     } else
       digitalWrite(Indef, HIGH);
   } else {
-    BT.print("Error en la solicitud: ");
-    BT.println(httpResponseCode);
+    logError("Error en la solicitud: " + String(httpResponseCode));
     digitalWrite(Error, HIGH);
   }
 
@@ -749,15 +726,13 @@ int sendPostRequestFromJson(String paquete) {
 
   // Maneja la respuesta del servidor
   if (httpResponseCode > 0) {
-    Serial.print("Respuesta del servidor: ");
-    Serial.println(httpResponseCode);
+    logDebug("Respuesta del servidor: " + String(httpResponseCode));
     if (httpResponseCode == 201) {
       digitalWrite(Ok, HIGH);
     } else
       digitalWrite(Indef, HIGH);
   } else {
-    BT.print("Error en la solicitud: ");
-    BT.println(httpResponseCode);
+    logError("Error en la solicitud: " + String(httpResponseCode));
     digitalWrite(Error, HIGH);
   }
   // Libera los recursos
@@ -775,6 +750,10 @@ float leerRadiancia() {
   if (rad > 1) {
     M.insolacion_horas++;
   }
+  logDebug("--- Lectura de sensores ---");
+  logDebug("Radiancia Solar: " + String(rad) + " W/m2");
+  logDebug("Insolación Acumulada: " + String(M.insolacion_horas) + " minutos");
+  return rad;
 }
 
 void actualizarSensores(AcumuladosSensores &S) {
@@ -784,10 +763,10 @@ void actualizarSensores(AcumuladosSensores &S) {
   s.Precp = pulsosPl * mmPorVolcada;
   pulsosPl = 0;
 
-  BT.println("--- Lectura de sensores ---");
-  BT.println("Temp: " + String(s.T) + " C");
-  BT.println("Hum: " + String(s.H) + " %");
-  BT.println("Precipitacion: " + String(s.Precp) + " mm");
+  logDebug("--- Lectura de sensores ---");
+  logDebug("Temp: " + String(s.T) + " C");
+  logDebug("Hum: " + String(s.H) + " %");
+  logDebug("Precipitacion: " + String(s.Precp) + " mm");
 
   S.sumaTemp += s.T;
   if (s.T > S.tempMax)
@@ -802,7 +781,7 @@ void actualizarSensores(AcumuladosSensores &S) {
     S.humMin = s.H;
 
   S.precipitacion += s.Precp;
-  BT.println("Precipitacion acumulada: " + String(S.precipitacion) + " mm");
+  logInfo("Precipitacion acumulada: " + String(S.precipitacion) + " mm");
 
   S.muestras++;
 }
@@ -845,25 +824,11 @@ void actualizarAnemometro(AcumuladosAnemometro &A) {
   sector %= 36;
   A.histograma[sector]++;
 
-  //DEBUG
-  Serial.print("Voltaje Real: ");
-  Serial.print(voltaje_mV, 1);
-  Serial.print(" mV | Vel Actual: ");
-  Serial.print(velocidadKmH, 2);
-  Serial.print(" km/h | MAX: ");
-  Serial.print(A.velMax, 2);
-  Serial.print(" | MIN: ");
-  if (A.velMin == 999.0) {
-    Serial.print(0.00);
-  } else {
-    Serial.print(A.velMin, 2);
-  }
-  Serial.print(" || Veleta: ");
-  Serial.print(veleta, 1);
-  Serial.print(" | Dir: ");
-  Serial.print(anguloVeleta, 0);
-  Serial.print("° ");
-  Serial.println();
+  // Log por segundo: solo visible en modo debug
+  float velMinMostrar = (A.velMin == 999.0) ? 0.0 : A.velMin;
+  logPrintf(NIVEL_DEBUG,
+            "Voltaje Real: %.1f mV | Vel Actual: %.2f km/h | MAX: %.2f | MIN: %.2f || Veleta: %.1f | Dir: %.0f\xC2\xB0 ",
+            voltaje_mV, velocidadKmH, A.velMax, velMinMostrar, veleta, anguloVeleta);
 }
 
 float calcularPuntoRocio(float T, float HR) {
@@ -979,41 +944,38 @@ float leerHumedadFiltrada() {
 void bluetoothT(void *p) {
   while (1) {
     if (BT.available()) {
-      Serial.println("Recibiendo");
+      logDebug("Recibiendo");
 
       String incoming = BT.readStringUntil('\n');
       incoming.trim();
       incoming.toLowerCase();
 
-      Serial.println(incoming);
+      logDebug("Comando recibido: " + incoming);
       if (incoming == "descargar") {
-        Serial.println("descargando informacion");
+        logInfo("descargando informacion");
         myFile = SD.open("/resp.csv", FILE_READ);
         if (!myFile) {
-          BT.println("Error al leer el archivo");
-          Serial.println("Error al leer el archivo");
-          return;
+          logError("Error al leer el archivo");
+          continue;  // volver al inicio del while: un return terminaria la tarea
         }
-        BT.println("Transmitiendo información...");
-        Serial.println("Transmitiendo información...");
+        logInfo("Transmitiendo información...");
         while (myFile.available()) {
           BT.write(myFile.read());
         }
         myFile.close();
         if (SD.remove("/resp.csv")) {
-          Serial.println("Archivo resp.csv eliminado.");
+          logInfo("Archivo resp.csv eliminado.");
         } else {
-          Serial.println("Error al eliminar el archivo resp.csv.");
+          logError("Error al eliminar el archivo resp.csv.");
         }
-        BT.println("Transmisión completa.");
-        Serial.println("Transmisión completa.");
+        logInfo("Transmisión completa.");
       } else if (incoming == "wifi") {
         BT.println("Ingrese el nombre de la red");
         while (1) {
           if (BT.available()) {
             ssid = BT.readStringUntil('\n');
             ssid.trim();
-            Serial.println(ssid);
+            logInfo("Nueva red WiFi: " + ssid);
             preferences.putString("ssid", ssid);
 
             break;
@@ -1024,7 +986,7 @@ void bluetoothT(void *p) {
           if (BT.available()) {
             password = BT.readStringUntil('\n');
             password.trim();
-            Serial.println(password);
+            logInfo(F("Contraseña WiFi guardada"));
             preferences.putString("password", password);
             esp_restart();
           }
@@ -1035,8 +997,7 @@ void bluetoothT(void *p) {
           if (BT.available()) {
             apiEndpoint = BT.readStringUntil('\n');
             apiEndpoint.trim();
-            Serial.println("Nueva API: " + apiEndpoint);
-            BT.println("Nueva API: " + apiEndpoint);
+            logInfo("Nueva API: " + apiEndpoint);
             preferences.putString("apiURL", apiEndpoint);
             BT.println("URL guardada. Reiniciando...");
             delay(500);
@@ -1085,6 +1046,12 @@ void bluetoothT(void *p) {
       } else if (incoming == "version") {
         BT.println("Revisando actualizacion... el Bluetooth se reiniciara, reconecta en unos segundos");
         otaManualSolicitada = true;  // lo ejecuta el loop()
+      } else if (incoming == "debug") {
+        modoLog = MODO_DEBUG;
+        logInfo(F("Modo de log: DEBUG (todos los mensajes por Serial y Bluetooth)"));
+      } else if (incoming == "production" || incoming == "produccion") {
+        modoLog = MODO_PRODUCTION;
+        logInfo(F("Modo de log: PRODUCTION (solo INFO y ERROR)"));
       }
     }
     vTaskDelay(1);
@@ -1126,8 +1093,7 @@ bool ajustarRTCManual(String fechaHora) {
 
 bool sincronizarRTCconNTP() {
 
-  Serial.println("Sincronizando hora con NTP...");
-  BT.println("Sincronizando hora con NTP...");
+  logInfo("Sincronizando hora con NTP...");
 
   // GMT-4 Venezuela
   configTime(-4 * 3600, 0, "pool.ntp.org", "time.nist.gov");
@@ -1142,8 +1108,7 @@ bool sincronizarRTCconNTP() {
   }
 
   if (intentos >= 10) {
-    Serial.println("No se pudo obtener hora NTP");
-    BT.println("No se pudo obtener hora NTP");
+    logError("No se pudo obtener hora NTP");
     return false;
   }
 
@@ -1158,11 +1123,8 @@ bool sincronizarRTCconNTP() {
 
   DateTime rtcTime = rtc.now();
 
-  Serial.println("Hora RTC actual:");
-  Serial.println(rtcTime.timestamp());
-
-  Serial.println("Hora NTP:");
-  Serial.println(ntpTime.timestamp());
+  logDebug("Hora RTC actual: " + rtcTime.timestamp());
+  logDebug("Hora NTP: " + ntpTime.timestamp());
 
   // Diferencia en segundos
   uint32_t rtcUnix = rtcTime.unixtime();
@@ -1170,22 +1132,18 @@ bool sincronizarRTCconNTP() {
 
   long diferencia = abs((long)(ntpUnix - rtcUnix));
 
-  Serial.print("Diferencia RTC-NTP: ");
-  Serial.print(diferencia);
-  Serial.println(" segundos");
+  logPrintf(NIVEL_DEBUG, "Diferencia RTC-NTP: %ld segundos", diferencia);
 
   // Solo corregir si hay diferencia significativa
   if (diferencia > 5) {
 
     rtc.adjust(ntpTime);
 
-    Serial.println("RTC actualizada con NTP");
-    BT.println("RTC actualizada con NTP");
+    logInfo("RTC actualizada con NTP");
 
   } else {
 
-    Serial.println("RTC ya sincronizada");
-    BT.println("RTC ya sincronizada");
+    logInfo("RTC ya sincronizada");
   }
 
   return true;
@@ -1252,7 +1210,7 @@ void gestionarOTADiaria() {
 // BT.begin() despues de BT.end() no es confiable en el ESP32 (el equipo aparece
 // pero rechaza la conexion), por eso se reinicia para dejar el Bluetooth funcionando.
 void reiniciarPorOTA() {
-  Serial.println(F("[OTA] Reiniciando para restaurar el Bluetooth..."));
+  logInfo(F("[OTA] Reiniciando para restaurar el Bluetooth..."));
   delay(1000);
   ESP.restart();
 }
@@ -1260,23 +1218,24 @@ void reiniciarPorOTA() {
 // Devuelve true si pudo consultar el JSON (haya o no actualizacion).
 // Si instala un firmware nuevo, reinicia el equipo y no retorna.
 bool revisarActualizacionOTA() {
-  Serial.println(F("[OTA] Revisando version_firmware.json..."));
+  logInfo(F("[OTA] Revisando version_firmware.json..."));
 
   // Liberar RAM: el BT consume mucha y TLS necesita un bloque grande
-  Serial.printf("[OTA] Heap libre antes: %u  |  bloque max: %u\n", ESP.getFreeHeap(), ESP.getMaxAllocHeap());
+  logPrintf(NIVEL_DEBUG, "[OTA] Heap libre antes: %u  |  bloque max: %u", ESP.getFreeHeap(), ESP.getMaxAllocHeap());
+  btActivo = false;  // el Bluetooth se apaga: dejar de escribir en BT
   BT.end();
   delay(200);
-  Serial.printf("[OTA] Heap libre despues de BT.end(): %u  |  bloque max: %u\n", ESP.getFreeHeap(), ESP.getMaxAllocHeap());
+  logPrintf(NIVEL_DEBUG, "[OTA] Heap libre despues de BT.end(): %u  |  bloque max: %u", ESP.getFreeHeap(), ESP.getMaxAllocHeap());
 
   String version, url;
   bool consultaOK = obtenerInfoOTA(version, url);
 
   if (consultaOK) {
     if (versionEsMayor(version, FIRMWARE_VERSION)) {
-      Serial.printf("[OTA] Nueva version disponible: v%s (actual v%s)\n", version.c_str(), FIRMWARE_VERSION);
+      logPrintf(NIVEL_INFO, "[OTA] Nueva version disponible: v%s (actual v%s)", version.c_str(), FIRMWARE_VERSION);
       ejecutarOTA(version, url);  // si sale bien, reinicia y no vuelve
     } else {
-      Serial.printf("[OTA] Firmware al dia (actual v%s, remota v%s)\n", FIRMWARE_VERSION, version.c_str());
+      logPrintf(NIVEL_INFO, "[OTA] Firmware al dia (actual v%s, remota v%s)", FIRMWARE_VERSION, version.c_str());
     }
   }
 
@@ -1294,13 +1253,13 @@ bool obtenerInfoOTA(String &version, String &url) {
   http.setTimeout(10000);
 
   if (!http.begin(client, OTA_VERSION_URL)) {
-    Serial.println(F("[OTA] No se pudo iniciar la conexion con GitHub"));
+    logError(F("[OTA] No se pudo iniciar la conexion con GitHub"));
     return false;
   }
 
   int code = http.GET();
   if (code != HTTP_CODE_OK) {
-    Serial.printf("[OTA] Error HTTP al leer el JSON: %d\n", code);
+    logPrintf(NIVEL_ERROR, "[OTA] Error HTTP al leer el JSON: %d", code);
     http.end();
     return false;
   }
@@ -1309,7 +1268,7 @@ bool obtenerInfoOTA(String &version, String &url) {
   http.end();
 
   if (payload.length() == 0 || payload.length() > 1024) {
-    Serial.println(F("[OTA] JSON vacio o demasiado grande"));
+    logError(F("[OTA] JSON vacio o demasiado grande"));
     return false;
   }
 
@@ -1319,11 +1278,11 @@ bool obtenerInfoOTA(String &version, String &url) {
   url.trim();
 
   if (version.length() == 0 || url.length() == 0) {
-    Serial.println(F("[OTA] JSON invalido: faltan campos version o url"));
+    logError(F("[OTA] JSON invalido: faltan campos version o url"));
     return false;
   }
   if (!url.startsWith("https://")) {
-    Serial.println(F("[OTA] Rechazado: la URL del firmware no es HTTPS"));
+    logError(F("[OTA] Rechazado: la URL del firmware no es HTTPS"));
     return false;
   }
   return true;
@@ -1380,9 +1339,9 @@ bool versionEsMayor(String nueva, String actual) {
 }
 
 void ejecutarOTA(const String &version, const String &url) {
-  Serial.printf("\n[OTA] ======= INICIANDO OTA =======\n");
-  Serial.printf("[OTA] Actual: v%s  ->  Nueva: v%s\n", FIRMWARE_VERSION, version.c_str());
-  Serial.printf("[OTA] URL: %s\n", url.c_str());
+  logInfo(F("[OTA] ======= INICIANDO OTA ======="));
+  logPrintf(NIVEL_INFO, "[OTA] Actual: v%s  ->  Nueva: v%s", FIRMWARE_VERSION, version.c_str());
+  logPrintf(NIVEL_DEBUG, "[OTA] URL: %s", url.c_str());
 
   WiFiClientSecure client;
   client.setInsecure();
@@ -1390,20 +1349,99 @@ void ejecutarOTA(const String &version, const String &url) {
   httpUpdate.rebootOnUpdate(false);
   httpUpdate.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
 
-  Serial.println("[OTA] Descargando .bin...");
+  logInfo(F("[OTA] Descargando .bin..."));
   t_httpUpdate_return result = httpUpdate.update(client, url);
 
   switch (result) {
     case HTTP_UPDATE_FAILED:
-      Serial.printf("[OTA] ERROR: %s\n", httpUpdate.getLastErrorString().c_str());
+      logPrintf(NIVEL_ERROR, "[OTA] ERROR: %s", httpUpdate.getLastErrorString().c_str());
       break;
     case HTTP_UPDATE_NO_UPDATES:
-      Serial.println("[OTA] El servidor dice: sin cambios en el .bin");
+      logInfo(F("[OTA] El servidor dice: sin cambios en el .bin"));
       break;
     case HTTP_UPDATE_OK:
-      Serial.println("[OTA] Descarga OK. Reiniciando...");
+      logInfo(F("[OTA] Descarga OK. Reiniciando..."));
       delay(500);
       ESP.restart();
       break;
   }
+}
+
+// ============================================================
+//  SISTEMA DE LOGS
+// ============================================================
+// Reglas de salida (unico lugar donde se decide que se muestra):
+//   PRODUCTION (estandar): Serial -> INFO y ERROR | Bluetooth -> INFO y ERROR (funcionamiento de la estacion)
+//   DEBUG (comando "debug" por Bluetooth): Serial y Bluetooth -> INFO, ERROR y DEBUG
+bool logSerialPermitido(NivelLog nivel) {
+  if (modoLog == MODO_DEBUG) return true;
+  return nivel == NIVEL_INFO || nivel == NIVEL_ERROR;
+}
+
+bool logBTPermitido(NivelLog nivel) {
+  if (!btActivo) return false;  // Bluetooth apagado (OTA) o aun no iniciado
+  if (modoLog == MODO_DEBUG) return true;
+  return nivel == NIVEL_INFO || nivel == NIVEL_ERROR;
+}
+
+void logMsg(NivelLog nivel, const String &msg) {
+  bool aSerial = logSerialPermitido(nivel);
+  bool aBT = logBTPermitido(nivel);
+  if (!aSerial && !aBT) return;
+
+  const char *etiqueta;
+  switch (nivel) {
+    case NIVEL_ERROR: etiqueta = "[ERROR] "; break;
+    case NIVEL_DEBUG: etiqueta = "[DEBUG] "; break;
+    default: etiqueta = "[INFO] "; break;
+  }
+  String linea = String(etiqueta) + msg;
+
+  if (logMutex) xSemaphoreTake(logMutex, portMAX_DELAY);
+  if (aSerial) Serial.println(linea);
+  if (aBT) BT.println(linea);
+  if (logMutex) xSemaphoreGive(logMutex);
+}
+
+// Version con formato tipo printf (maximo 256 caracteres por mensaje)
+void logPrintf(NivelLog nivel, const char *fmt, ...) {
+  if (!logSerialPermitido(nivel) && !logBTPermitido(nivel)) return;
+  char buf[256];
+  va_list args;
+  va_start(args, fmt);
+  vsnprintf(buf, sizeof(buf), fmt, args);
+  va_end(args);
+  logMsg(nivel, String(buf));
+}
+
+void logInfo(const String &msg) {
+  logMsg(NIVEL_INFO, msg);
+}
+void logDebug(const String &msg) {
+  logMsg(NIVEL_DEBUG, msg);
+}
+void logError(const String &msg) {
+  logMsg(NIVEL_ERROR, msg);
+}
+
+// Resumen de la hora (antes estaba duplicado en SDloop() y regLoop())
+void logResumenMedidas(DateTime now) {
+  logInfo("--- Lectura de sensores ---");
+  logInfo("Temperatura Promedio del Aire: " + String(M.temp_aire_prom_c) + " C");
+  logInfo("Temperatura Maxima del Aire: " + String(M.temp_aire_max_c) + " C");
+  logInfo("Temperatura Minima del Aire: " + String(M.temp_aire_min_c) + " C");
+  logInfo("Punto de Rocio Calculado: " + String(M.punto_rocio_c) + " C");
+  logInfo("Humedad Relativa Promedio: " + String(M.humedad_rel_prom) + " %");
+  logInfo("Humedad Relativa Maxima: " + String(M.humedad_rel_max) + " %");
+  logInfo("Humedad Relativa Minima: " + String(M.humedad_rel_min) + " %");
+  logInfo("Radiancia Solar: " + String(M.radiacion_solar_w_m2) + " W/m2");
+  logInfo("Insolación: " + String(M.insolacion_horas) + " h");
+  logInfo("Velocidad del Viento Promedio: " + String(M.viento_vel_prom_ms) + " m/s");
+  logInfo("Velocidad Máxima del Viento: " + String(M.viento_vel_max_ms) + " m/s");
+  logInfo("Velocidad Minima del Viento: " + String(M.viento_vel_min_ms) + " m/s");
+  logInfo("Moda Dirección del Viento: " + String(M.viento_dir_moda_deg) + " °");
+  logInfo("Presión Atmosférica: " + String(M.presion_atmos_hpa) + " hPa");
+  logInfo("Precipitación Acumulada: " + String(M.precipitacion_mm) + " mm");
+  logInfo("Fecha: " + String(now.day()) + "/" + String(now.month()) + "/" + String(now.year()));
+  logInfo("Hora: " + String(now.hour()) + ":" + String(now.minute()) + ":" + String(now.second()));
 }
