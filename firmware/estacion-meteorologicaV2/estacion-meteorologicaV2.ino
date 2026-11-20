@@ -19,7 +19,7 @@
 
 // ================= CONFIGURACIÓN =================
 #define ESTACION_NUMERO 1
-#define FIRMWARE_VERSION "2.79"  //Mejora de los logs
+#define FIRMWARE_VERSION "2.80"  //Se arreglo el error que envia 1000 en la velocidad del viento minima
 // ─── OTA diaria desde GitHub ─────────────────────────────────
 // Archivo JSON con el formato: {"version":"2.5","url":"https://.../firmware.bin"}
 #define OTA_VERSION_URL "https://raw.githubusercontent.com/electronicavultur-maker/Estacion-Meteorologica/main/firmware_version.json"
@@ -88,6 +88,7 @@ volatile bool otaManualSolicitada = false;
 
 
 // Variables del anemómetro
+const float VELOCIDAD_VIENTO_MAX_MS = 60.0;
 float maxVelocidad = 0.0;
 float minVelocidad = 999.0;
 float promedioVelocidad = 0.0;
@@ -259,7 +260,7 @@ void actualizarSensores(AcumuladosSensores &S);
 void actualizarAnemometro(AcumuladosAnemometro &A);
 bool asegurarWiFi();
 void configurarAPI();
-bool tMedidas(int conf, int minutos, int segundos);
+bool tMedidas(int conf, DateTime now);
 bool sincronizarRTCconNTP();
 bool ajustarRTCManual(String fechaHora);
 void guardarRespaldoSD(Medidas M);
@@ -405,15 +406,15 @@ void loop() {
 
 void SDloop() {
   DateTime now = rtc.now();
-  if (tMedidas(1, now.minute(), now.second())) {
+  if (tMedidas(1, now)) {
     logInfo("Tomando las medidas por minuto (Radiancia Solar e Insolacion)");
     leerRadiancia();
   }
-  if (tMedidas(2, now.minute(), now.second())) {
+  if (tMedidas(2, now)) {
     logInfo("Tomando las medidas de 5 minutos (Temperatura, Humedad, Precipitacion)");
     actualizarSensores(S);
   }
-  if (tMedidas(3, now.minute(), now.second())) {
+  if (tMedidas(3, now)) {
     logInfo("Calculando las medidas al final de la hora y preparando para enviar (Punto rocio y presion)");
     if (S.muestras > 0) {
       M.temp_aire_prom_c = S.sumaTemp / S.muestras;
@@ -433,10 +434,13 @@ void SDloop() {
 
     if (A.muestras > 0) {
       M.viento_vel_prom_ms = A.sumaVelocidad / A.muestras;
+      M.viento_vel_max_ms = A.velMax;
+      M.viento_vel_min_ms = A.velMin;
+    } else {
+      M.viento_vel_prom_ms = 0;
+      M.viento_vel_max_ms = 0;
+      M.viento_vel_min_ms = 0;
     }
-
-    M.viento_vel_max_ms = A.velMax;
-    M.viento_vel_min_ms = A.velMin;
 
     int sectorModa = 0;
 
@@ -520,15 +524,15 @@ void SDloop() {
 
 void regLoop() {
   DateTime now = rtc.now();
-  if (tMedidas(1, now.minute(), now.second())) {
+  if (tMedidas(1, now)) {
     logInfo("Tomando las medidas por minuto (Radiancia Solar e Insolacion)");
     leerRadiancia();
   }
-  if (tMedidas(2, now.minute(), now.second())) {
+  if (tMedidas(2, now)) {
     logInfo("Tomando las medidas de 5 minutos (Temperatura, Humedad, Precipitacion)");
     actualizarSensores(S);
   }
-  if (tMedidas(3, now.minute(), now.second())) {
+  if (tMedidas(3, now)) {
     logInfo("Calculando las medidas al final de la hora y preparando para enviar (Punto rocio y presion)");
     if (S.muestras > 0) {
       M.temp_aire_prom_c = S.sumaTemp / S.muestras;
@@ -547,10 +551,13 @@ void regLoop() {
 
     if (A.muestras > 0) {
       M.viento_vel_prom_ms = A.sumaVelocidad / A.muestras;
+      M.viento_vel_max_ms = A.velMax;
+      M.viento_vel_min_ms = A.velMin;
+    } else {
+      M.viento_vel_prom_ms = 0;
+      M.viento_vel_max_ms = 0;
+      M.viento_vel_min_ms = 0;
     }
-
-    M.viento_vel_max_ms = A.velMax;
-    M.viento_vel_min_ms = A.velMin;
 
     int sectorModa = 0;
 
@@ -805,14 +812,16 @@ void actualizarAnemometro(AcumuladosAnemometro &A) {
     velocidadKmH = 9.04 - (0.00185 * voltaje_mV) + (0.0000307 * voltaje_mV * voltaje_mV);
   }
 
-  A.sumaVelocidad += velocidadKmH;
-  if (velocidadKmH > A.velMax)
-    A.velMax = velocidadKmH;
+  float velocidadMs = velocidadKmH / 3.6;
+  if (velocidadMs > VELOCIDAD_VIENTO_MAX_MS)
+    velocidadMs = VELOCIDAD_VIENTO_MAX_MS;
 
-  if (velocidadKmH > 0.0) {
-    if (velocidadKmH < A.velMin)
-      A.velMin = velocidadKmH;
-  }
+  A.sumaVelocidad += velocidadMs;
+  if (velocidadMs > A.velMax)
+    A.velMax = velocidadMs;
+
+  if (velocidadMs < A.velMin)
+    A.velMin = velocidadMs;
 
   A.muestras++;
 
@@ -825,10 +834,10 @@ void actualizarAnemometro(AcumuladosAnemometro &A) {
   A.histograma[sector]++;
 
   // Log por segundo: solo visible en modo debug
-  float velMinMostrar = (A.velMin == 999.0) ? 0.0 : A.velMin;
+  float velMinMostrar = (A.velMin == 1000.0) ? 0.0 : A.velMin;
   logPrintf(NIVEL_DEBUG,
-            "Voltaje Real: %.1f mV | Vel Actual: %.2f km/h | MAX: %.2f | MIN: %.2f || Veleta: %.1f | Dir: %.0f\xC2\xB0 ",
-            voltaje_mV, velocidadKmH, A.velMax, velMinMostrar, veleta, anguloVeleta);
+            "Voltaje Real: %.1f mV | Vel Actual: %.2f m/s | MAX: %.2f | MIN: %.2f || Veleta: %.1f | Dir: %.0f\xC2\xB0 ",
+            voltaje_mV, velocidadMs, A.velMax, velMinMostrar, veleta, anguloVeleta);
 }
 
 float calcularPuntoRocio(float T, float HR) {
@@ -842,32 +851,35 @@ float calcularPuntoRocio(float T, float HR) {
   return (b * alpha) / (a - alpha);
 }
 
-bool tMedidas(int conf, int minutos, int segundos) {
+bool tMedidas(int conf, DateTime now) {
+  static uint32_t ultimoPeriodo[4] = {UINT32_MAX, UINT32_MAX, UINT32_MAX, UINT32_MAX};
+  uint32_t periodoSegundos;
+  bool minutoProgramado;
+
   switch (conf) {
-    case 1:  //Cada minuto
-      if ((segundos == 0)) {
-        return true;
-      } else {
-        return false;
-      }
+    case 1:
+      periodoSegundos = 60;
+      minutoProgramado = true;
       break;
-    case 2:  //Cada 5 minutos
-      if (((minutos % 5) == 0) && (segundos == 0)) {
-        return true;
-      } else {
-        return false;
-      }
+    case 2:
+      periodoSegundos = 300;
+      minutoProgramado = (now.minute() % 5) == 0;
       break;
-    case 3:  //Cada hora
-      if ((minutos == 0) && (segundos == 0)) {
-        return true;
-      } else {
-        return false;
-      }
+    case 3:
+      periodoSegundos = 3600;
+      minutoProgramado = now.minute() == 0;
       break;
     default:
-      return false;  // Retorno por defecto si 'conf' no coincide con ningún caso
+      return false;
   }
+
+  if (!minutoProgramado) return false;
+
+  uint32_t periodoActual = now.unixtime() / periodoSegundos;
+  if (ultimoPeriodo[conf] == periodoActual) return false;
+
+  ultimoPeriodo[conf] = periodoActual;
+  return true;
 }
 
 void IRAM_ATTR contar() {
