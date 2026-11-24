@@ -19,7 +19,7 @@
 
 // ================= CONFIGURACIÓN =================
 #define ESTACION_NUMERO 1
-#define FIRMWARE_VERSION "2.80"  //Se arreglo el error que envia 1000 en la velocidad del viento minima
+#define FIRMWARE_VERSION "2.81"  //Se agrego el calculo del recorrido del viento
 // ─── OTA diaria desde GitHub ─────────────────────────────────
 // Archivo JSON con el formato: {"version":"2.5","url":"https://.../firmware.bin"}
 #define OTA_VERSION_URL "https://raw.githubusercontent.com/electronicavultur-maker/Estacion-Meteorologica/main/firmware_version.json"
@@ -360,7 +360,7 @@ void setup() {
 
     BT.begin(("Estacion Meteorologica_" + String(serN)).c_str());  //Inicializacion de Bluetooth
     btActivo = true;
-    xTaskCreate(bluetoothT, "bluetooth", 4096, NULL, 1, NULL);     //Inicializacion de la tarea para la conexion Bluetooth
+    xTaskCreate(bluetoothT, "bluetooth", 4096, NULL, 1, NULL);  //Inicializacion de la tarea para la conexion Bluetooth
     digitalWrite(Indef, HIGH);
     delay(1000);
     digitalWrite(Indef, LOW);
@@ -436,10 +436,12 @@ void SDloop() {
       M.viento_vel_prom_ms = A.sumaVelocidad / A.muestras;
       M.viento_vel_max_ms = A.velMax;
       M.viento_vel_min_ms = A.velMin;
+      M.viento_recorrido_km = A.recorrido_km;
     } else {
       M.viento_vel_prom_ms = 0;
       M.viento_vel_max_ms = 0;
       M.viento_vel_min_ms = 0;
+      M.viento_recorrido_km = 0; 
     }
 
     int sectorModa = 0;
@@ -553,10 +555,12 @@ void regLoop() {
       M.viento_vel_prom_ms = A.sumaVelocidad / A.muestras;
       M.viento_vel_max_ms = A.velMax;
       M.viento_vel_min_ms = A.velMin;
+      M.viento_recorrido_km = A.recorrido_km;
     } else {
       M.viento_vel_prom_ms = 0;
       M.viento_vel_max_ms = 0;
       M.viento_vel_min_ms = 0;
+      M.viento_recorrido_km = 0; 
     }
 
     int sectorModa = 0;
@@ -615,7 +619,7 @@ void configurarAPI() {
     logInfo("API: " + apiEndpoint);
     return;
   }
-  apiEndpoint = "http://200.44.171.179:4069/api/stations/" + String(serN) + "/medidas";
+  apiEndpoint = "http://200.44.171.179:4069/api/stations/" + String(serN) + "/observations";
   preferences.putString("apiURL", apiEndpoint);
   logInfo("API: " + apiEndpoint);
 }
@@ -824,6 +828,17 @@ void actualizarAnemometro(AcumuladosAnemometro &A) {
     A.velMin = velocidadMs;
 
   A.muestras++;
+  // ---------- RECORRIDO DEL VIENTO ----------
+  // Acumulación: velocidad (m/s) x tiempo transcurrido (s) -> metros -> km
+  static unsigned long tAnterior = 0;
+  unsigned long tAhora = millis();
+  float dt = (tAnterior == 0) ? 1.0 : (tAhora - tAnterior) / 1000.0;
+  tAnterior = tAhora;
+
+  // Si hubo una pausa larga (envío HTTP, WiFi, OTA) no se inventa viento en ese hueco
+  if (dt > 5.0) dt = 1.0;
+
+  A.recorrido_km += (velocidadMs * dt) / 1000.0;
 
   // ---------- VELETA ----------
   float veleta = (float)sumaVeleta / numMuestras;
@@ -852,7 +867,7 @@ float calcularPuntoRocio(float T, float HR) {
 }
 
 bool tMedidas(int conf, DateTime now) {
-  static uint32_t ultimoPeriodo[4] = {UINT32_MAX, UINT32_MAX, UINT32_MAX, UINT32_MAX};
+  static uint32_t ultimoPeriodo[4] = { UINT32_MAX, UINT32_MAX, UINT32_MAX, UINT32_MAX };
   uint32_t periodoSegundos;
   bool minutoProgramado;
 
@@ -1451,6 +1466,7 @@ void logResumenMedidas(DateTime now) {
   logInfo("Velocidad del Viento Promedio: " + String(M.viento_vel_prom_ms) + " m/s");
   logInfo("Velocidad Máxima del Viento: " + String(M.viento_vel_max_ms) + " m/s");
   logInfo("Velocidad Minima del Viento: " + String(M.viento_vel_min_ms) + " m/s");
+    logInfo("Recorrido del Viento: " + String(M.viento_recorrido_km) + " km");
   logInfo("Moda Dirección del Viento: " + String(M.viento_dir_moda_deg) + " °");
   logInfo("Presión Atmosférica: " + String(M.presion_atmos_hpa) + " hPa");
   logInfo("Precipitación Acumulada: " + String(M.precipitacion_mm) + " mm");
